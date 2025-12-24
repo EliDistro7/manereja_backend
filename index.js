@@ -15,6 +15,7 @@ const serviceRoutes = require('./routes/manereja/service_routes.js');
 const eventRoutes = require('./routes/event-routes');
 const mediaRoutes = require('./routes/media-routes');
 const notificationsRoutes = require("./routes/notifications-routes.js");
+const syncRoutes = require("./routes/manereja/sync-routes.js");
 
 const PORT = process.env.PORT || 5000;
 
@@ -93,6 +94,7 @@ app.use('/', userRoutes);
 app.use('/', serviceRoutes);
 app.use('/api/media', mediaRoutes);
 app.use('/', notificationsRoutes);
+app.use('/sync', syncRoutes);
 
 // Start the server - IMPORTANT: bind to all interfaces
 server.listen(PORT, '0.0.0.0', () => {
