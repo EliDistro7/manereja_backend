@@ -1,6 +1,60 @@
 const mongoose = require("mongoose");
 const bcrypt = require("bcrypt");
 
+// ✅ NEW: Buyer Profile Sub-Schema
+const BuyerProfileSchema = new mongoose.Schema({
+  // Buyer preferences
+  preferredCategories: [{
+    type: String,
+    default: []
+  }],
+  savedAddresses: [{
+    type: String,
+    default: []
+  }],
+  defaultShippingAddress: {
+    type: String,
+    default: null
+  },
+  defaultBillingAddress: {
+    type: String,
+    default: null
+  },
+  
+  // Buyer stats
+  totalPurchases: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
+  totalReviews: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
+  averageRatingGiven: {
+    type: Number,
+    default: 0,
+    min: 0,
+    max: 5
+  },
+  lastPurchaseDate: {
+    type: Date,
+    default: null
+  },
+  
+  // Trust & verification
+  isVerifiedBuyer: {
+    type: Boolean,
+    default: false
+  },
+  verifiedPurchaseCount: {
+    type: Number,
+    default: 0,
+    min: 0
+  }
+}, { _id: false });
+
 const UserSchema = new mongoose.Schema({
   email: { 
     type: String, 
@@ -40,17 +94,72 @@ const UserSchema = new mongoose.Schema({
     unique: true, 
     sparse: true 
   },
-  // Role field with owner/employee enums
+
+  // ✅ Multi-Profile Support Fields
+  businessProfileIds: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'BusinessProfile',
+    default: []
+  }],
+  activeProfileId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'BusinessProfile',
+    default: null
+  },
+  defaultProfileId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'BusinessProfile',
+    default: null
+  },
+
+  // ✅ UPDATED: Role field with buyer and hybrid enums
   role: {
     type: String,
-    enum: ['owner', 'employee'],
+    enum: ['owner', 'employee', 'buyer', 'hybrid'],
     default: 'owner'
   },
-  // Linked accounts field to store users linked to this account
+
+  // ✅ NEW: User Context (buyer/seller mode)
+  currentContext: {
+    type: String,
+    enum: ['buying', 'selling'],
+    default: 'selling'
+  },
+
+  // ✅ NEW: Buyer Profile
+  buyerProfile: {
+    type: BuyerProfileSchema,
+    default: null
+  },
+
+  // ✅ NEW: Purchase & Review History
+  purchaseHistoryIds: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Purchase',
+    default: []
+  }],
+  reviewedItemIds: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'SalesItem',
+    default: []
+  }],
+  wishlistItemIds: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'SalesItem',
+    default: []
+  }],
+  cartItemIds: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'SalesItem',
+    default: []
+  }],
+
+  // Linked accounts field
   linked_accounts: {
     type: Object,
     default: {}
   },
+
   // Subscription and payment fields
   subscriptionType: {
     type: String,
@@ -88,10 +197,10 @@ const UserSchema = new mongoose.Schema({
     default: {}
   }
 }, {
-  timestamps: true // This automatically adds createdAt and updatedAt fields
+  timestamps: true
 });
 
-// Custom validation to ensure at least one contact method exists
+// Custom validation
 UserSchema.pre('validate', function(next) {
   if (!this.email && !this.phoneNumber) {
     const error = new Error('Either email or phone number must be provided');
@@ -114,24 +223,72 @@ UserSchema.pre('save', async function(next) {
   }
 });
 
-// Auto-create settings and services after user creation
+// ✅ UPDATED: Post-save hook with buyer profile initialization
 UserSchema.post('save', async function(doc) {
-  // Only run this for new users (not updates)
   if (this.isNew) {
     try {
-      // Import models here to avoid circular dependencies
-      const UserSettings = require('./settings'); // Adjust path as needed
-      const Service = require('./service'); // Adjust path as needed
-      const UserService = require('./userService'); // You'll need to create this model
+      const UserSettings = require('./settings');
+      const Service = require('./service');
+      const UserService = require('./services');
+      const BusinessProfile = require('./businessProfile');
 
-      // Create default settings for the user
+      // ✅ Initialize buyer profile for all new users
+      if (!doc.buyerProfile) {
+        doc.buyerProfile = {
+          preferredCategories: [],
+          savedAddresses: [],
+          defaultShippingAddress: null,
+          defaultBillingAddress: null,
+          totalPurchases: 0,
+          totalReviews: 0,
+          averageRatingGiven: 0,
+          lastPurchaseDate: null,
+          isVerifiedBuyer: false,
+          verifiedPurchaseCount: 0
+        };
+      }
+
+      // ✅ Create default "Personal" profile for new user
+      const defaultProfile = new BusinessProfile({
+        name: 'Personal',
+        type: 'personal',
+        ownerId: doc._id,
+        currency: {
+          code: 'USD',
+          symbol: '$',
+          name: 'US Dollar',
+          decimalPlaces: 2
+        },
+        isDefault: true,
+        isActive: true,
+        members: {
+          [doc._id]: {
+            userId: doc._id,
+            userName: doc.name,
+            userEmail: doc.email || '',
+            role: 'owner',
+            addedAt: new Date()
+          }
+        }
+      });
+
+      await defaultProfile.save();
+
+      // ✅ Link profile to user
+      doc.businessProfileIds = [defaultProfile._id];
+      doc.activeProfileId = defaultProfile._id;
+      doc.defaultProfileId = defaultProfile._id;
+      await doc.save();
+
+      console.log(`✅ Created default profile for user: ${doc._id}`);
+
+      // Create default settings
       const defaultSettings = UserSettings.createDefaultSettings(doc._id);
       await defaultSettings.save();
 
       // Get all active services and create user-service associations
       const activeServices = await Service.find({ isActive: true });
       
-      // Create user service records for each active service
       const userServices = activeServices.map(service => ({
         userId: doc._id,
         serviceId: service._id,
@@ -142,35 +299,29 @@ UserSchema.post('save', async function(doc) {
         metadata: {}
       }));
 
-      // Bulk insert user services
       if (userServices.length > 0) {
         await UserService.insertMany(userServices);
       }
 
-      console.log(`Successfully created settings and services for user: ${doc._id}`);
+      console.log(`✅ Successfully created profile, buyer profile, settings and services for user: ${doc._id}`);
     } catch (error) {
-      console.error('Error creating user settings and services:', error);
-      // Note: We don't throw here to avoid breaking user creation
-      // You might want to implement a retry mechanism or alert system
+      console.error('❌ Error creating user profile and buyer profile:', error);
     }
   }
 });
 
-// Method to compare passwords
+// Existing methods
 UserSchema.methods.comparePassword = async function(candidatePassword) {
   return await bcrypt.compare(candidatePassword, this.password);
 };
 
-// Method to check if user has active access (free trial or premium)
 UserSchema.methods.hasActiveAccess = function() {
   const now = new Date();
   
-  // Check if premium subscription is active
   if (this.hasActivePremium && this.premiumExpiryDate && this.premiumExpiryDate > now) {
     return true;
   }
   
-  // Check if free trial is still active
   if (this.subscriptionType === 'free' && this.freeTrialEndDate > now) {
     return true;
   }
@@ -178,12 +329,10 @@ UserSchema.methods.hasActiveAccess = function() {
   return false;
 };
 
-// Method to check if free trial has expired
 UserSchema.methods.isTrialExpired = function() {
   return this.subscriptionType === 'free' && new Date() > this.freeTrialEndDate;
 };
 
-// Method to upgrade to premium
 UserSchema.methods.upgradeToPremium = async function(durationInMonths = 1) {
   const now = new Date();
   const expiryDate = new Date();
@@ -195,7 +344,6 @@ UserSchema.methods.upgradeToPremium = async function(durationInMonths = 1) {
   
   await this.save();
 
-  // Update user services to enable premium services
   const UserService = require('./userService');
   const Service = require('./service');
   
@@ -204,7 +352,6 @@ UserSchema.methods.upgradeToPremium = async function(durationInMonths = 1) {
     isActive: true 
   });
   
-  // Enable premium services for this user
   for (const service of premiumServices) {
     await UserService.findOneAndUpdate(
       { userId: this._id, serviceId: service._id },
@@ -216,7 +363,6 @@ UserSchema.methods.upgradeToPremium = async function(durationInMonths = 1) {
   return this;
 };
 
-// Method to get remaining trial days
 UserSchema.methods.getRemainingTrialDays = function() {
   if (this.subscriptionType !== 'free') return 0;
   
@@ -227,7 +373,6 @@ UserSchema.methods.getRemainingTrialDays = function() {
   return Math.max(0, daysDiff);
 };
 
-// Method to get user's accessible services
 UserSchema.methods.getAccessibleServices = async function() {
   const UserService = require('./userService');
   const Service = require('./service');
@@ -243,20 +388,147 @@ UserSchema.methods.getAccessibleServices = async function() {
   );
 };
 
-// Method to transform document for JSON response (matches your Flutter model)
+// ✅ NEW: Buyer-specific methods
+UserSchema.methods.switchToBuyerMode = async function() {
+  this.currentContext = 'buying';
+  await this.save();
+  return this;
+};
+
+UserSchema.methods.switchToSellerMode = async function() {
+  this.currentContext = 'selling';
+  await this.save();
+  return this;
+};
+
+UserSchema.methods.addToWishlist = async function(itemId) {
+  if (!this.wishlistItemIds.includes(itemId)) {
+    this.wishlistItemIds.push(itemId);
+    await this.save();
+  }
+  return this;
+};
+
+UserSchema.methods.removeFromWishlist = async function(itemId) {
+  this.wishlistItemIds = this.wishlistItemIds.filter(id => id.toString() !== itemId.toString());
+  await this.save();
+  return this;
+};
+
+UserSchema.methods.addToCart = async function(itemId) {
+  if (!this.cartItemIds.includes(itemId)) {
+    this.cartItemIds.push(itemId);
+    await this.save();
+  }
+  return this;
+};
+
+UserSchema.methods.removeFromCart = async function(itemId) {
+  this.cartItemIds = this.cartItemIds.filter(id => id.toString() !== itemId.toString());
+  await this.save();
+  return this;
+};
+
+UserSchema.methods.clearCart = async function() {
+  this.cartItemIds = [];
+  await this.save();
+  return this;
+};
+
+UserSchema.methods.addPurchase = async function(itemId) {
+  if (!this.purchaseHistoryIds.includes(itemId)) {
+    this.purchaseHistoryIds.push(itemId);
+    
+    // Update buyer profile stats
+    if (this.buyerProfile) {
+      this.buyerProfile.totalPurchases += 1;
+      this.buyerProfile.lastPurchaseDate = new Date();
+    }
+    
+    await this.save();
+  }
+  return this;
+};
+
+UserSchema.methods.markAsReviewed = async function(itemId) {
+  if (!this.reviewedItemIds.includes(itemId)) {
+    this.reviewedItemIds.push(itemId);
+    
+    // Update buyer profile stats
+    if (this.buyerProfile) {
+      this.buyerProfile.totalReviews += 1;
+    }
+    
+    await this.save();
+  }
+  return this;
+};
+
+UserSchema.methods.hasPurchased = function(itemId) {
+  return this.purchaseHistoryIds.some(id => id.toString() === itemId.toString());
+};
+
+UserSchema.methods.hasReviewed = function(itemId) {
+  return this.reviewedItemIds.some(id => id.toString() === itemId.toString());
+};
+
+UserSchema.methods.canReview = function(itemId) {
+  return this.hasPurchased(itemId) && !this.hasReviewed(itemId);
+};
+
+UserSchema.methods.updateBuyerRating = async function(newRating) {
+  if (this.buyerProfile && this.buyerProfile.totalReviews > 0) {
+    const currentTotal = this.buyerProfile.averageRatingGiven * (this.buyerProfile.totalReviews - 1);
+    this.buyerProfile.averageRatingGiven = (currentTotal + newRating) / this.buyerProfile.totalReviews;
+    await this.save();
+  }
+  return this;
+};
+
+UserSchema.methods.verifyBuyer = async function() {
+  if (this.buyerProfile) {
+    this.buyerProfile.isVerifiedBuyer = true;
+    await this.save();
+  }
+  return this;
+};
+
+UserSchema.methods.incrementVerifiedPurchases = async function() {
+  if (this.buyerProfile) {
+    this.buyerProfile.verifiedPurchaseCount += 1;
+    await this.save();
+  }
+  return this;
+};
+
+// ✅ UPDATED: toJSON method with buyer fields
 UserSchema.methods.toJSON = function() {
   const userObject = this.toObject();
 
-  // Remove sensitive fields
   delete userObject.password;
   delete userObject.googleId;
   delete userObject.__v;
 
-  // Transform _id to id to match Flutter model
   userObject.id = userObject._id;
   delete userObject._id;
 
-  // Add computed fields
+  // Transform profile IDs to strings
+  userObject.businessProfileIds = (userObject.businessProfileIds || []).map(id => id.toString());
+  userObject.activeProfileId = userObject.activeProfileId ? userObject.activeProfileId.toString() : null;
+  userObject.defaultProfileId = userObject.defaultProfileId ? userObject.defaultProfileId.toString() : null;
+
+  // ✅ Transform buyer-related IDs to strings
+  userObject.purchaseHistoryIds = (userObject.purchaseHistoryIds || []).map(id => id.toString());
+  userObject.reviewedItemIds = (userObject.reviewedItemIds || []).map(id => id.toString());
+  userObject.wishlistItemIds = (userObject.wishlistItemIds || []).map(id => id.toString());
+  userObject.cartItemIds = (userObject.cartItemIds || []).map(id => id.toString());
+
+  // ✅ Add buyer profile with id
+  if (userObject.buyerProfile) {
+    userObject.buyerProfile.id = this._id.toString();
+    userObject.buyerProfile.userId = this._id.toString();
+  }
+
   userObject.hasActiveAccess = this.hasActiveAccess();
   userObject.isTrialExpired = this.isTrialExpired();
   userObject.remainingTrialDays = this.getRemainingTrialDays();
@@ -264,7 +536,7 @@ UserSchema.methods.toJSON = function() {
   return userObject;
 };
 
-// Add indexes for compound unique constraints and faster lookups
+// ✅ UPDATED: Add indexes for buyer fields
 UserSchema.index({ email: 1 }, { unique: true, sparse: true });
 UserSchema.index({ phoneNumber: 1 }, { unique: true, sparse: true });
 UserSchema.index({ googleId: 1 }, { sparse: true });
@@ -273,5 +545,10 @@ UserSchema.index({ phoneNumber: 1, authType: 1 }, { sparse: true });
 UserSchema.index({ subscriptionType: 1 });
 UserSchema.index({ freeTrialEndDate: 1 });
 UserSchema.index({ premiumExpiryDate: 1 });
+UserSchema.index({ role: 1 });
+UserSchema.index({ currentContext: 1 });
+UserSchema.index({ 'buyerProfile.isVerifiedBuyer': 1 });
+UserSchema.index({ purchaseHistoryIds: 1 });
+UserSchema.index({ wishlistItemIds: 1 });
 
 module.exports = mongoose.model("ManerejaUser", UserSchema);

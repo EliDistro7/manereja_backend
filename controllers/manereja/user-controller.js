@@ -5,6 +5,8 @@ const UserSettings = require('../../models/manereja/settings.js'); // Adjust pat
 const Service = require('../../models/manereja/service.js'); // Adjust path as needed
 const UserService = require('../../models/manereja/services.js'); // Adjust path as needed
 const { validationResult } = require('express-validator');
+const BusinessProfile = require('../../models/manereja/business-profile.js');
+
 
 class UserController {
   constructor() {
@@ -44,6 +46,82 @@ class UserController {
       { expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '30d' }
     );
   }
+
+
+// Fixed Switch active profile method
+switchActiveProfile = async (req, res) => {
+  try {
+    const { activeProfileId } = req.body;
+    console.log('🔄 Switching active profile - Request body:', req.body);
+    
+    // ✅ userId comes from req.user (set by auth middleware from JWT token)
+    const userId = req.user.userId;
+    console.log('👤 User ID from token:', userId);
+
+    if (!activeProfileId) {
+      return this.errorResponse(res, 'Profile ID is required', 400);
+    }
+
+    // Find user
+    const user = await User.findById(userId);
+    if (!user) {
+      console.log('❌ User not found:', userId);
+      return this.errorResponse(res, 'User not found', 404);
+    }
+
+    console.log('👤 User found:', user.email);
+    console.log('📋 User business profiles:', user.businessProfileIds);
+
+    // Verify user has access to this profile
+    const hasAccess = user.businessProfileIds.some(
+      id => id.toString() === activeProfileId
+    );
+
+    if (!hasAccess) {
+      console.log('❌ Access denied to profile:', activeProfileId);
+      return this.errorResponse(res, 'Access denied to this profile', 403);
+    }
+
+    // Verify profile exists
+    const BusinessProfile = require('../../models/manereja/business-profile.js');
+    const profile = await BusinessProfile.findById(activeProfileId);
+    
+    if (!profile) {
+      console.log('❌ Profile not found:', activeProfileId);
+      return this.errorResponse(res, 'Profile not found', 404);
+    }
+
+    console.log('📋 Profile found:', profile.name);
+
+    // Verify user actually has access to this profile (owner or member)
+    const isOwner = profile.ownerId.toString() === userId;
+    const isMember = profile.members && profile.members.has(userId);
+
+    if (!isOwner && !isMember) {
+      console.log('❌ User is not owner or member of profile');
+      return this.errorResponse(res, 'Access denied to this profile', 403);
+    }
+
+    // Update active profile
+    user.activeProfileId = activeProfileId;
+    
+    // Update last accessed
+    profile.lastAccessedAt = new Date();
+    await profile.save();
+    
+    await user.save();
+
+    console.log(`✅ User ${userId} switched to profile ${activeProfileId}`);
+
+    return this.successResponse(res, 'Active profile switched successfully', {
+      user: user.toJSON(),
+      profile: profile.toJSON()
+    });
+  } catch (error) {
+    console.error('❌ Switch active profile error:', error);
+    return this.errorResponse(res, 'Error switching profile', 500);
+  }
+};
 
   // Verify JWT token
   verifyToken(token) {
@@ -163,8 +241,8 @@ class UserController {
       // Initialize settings and services manually if post-save hook fails
       try {
        let settings_services= await this.initializeUserSettingsAndServices(user._id, user.subscriptionType);
-       console.log('User settings and services initialized:', settings_services);
-        console.log('User settings and services initialized successfully');
+     //  console.log('User settings and services initialized:', settings_services);
+      //  console.log('User settings and services initialized successfully');
       } catch (initError) {
         console.log('Manual initialization failed:', initError);
         console.error('Manual initialization failed:', initError);
@@ -192,56 +270,73 @@ class UserController {
     }
   }
 
-  // Sign in with email and password
-  signIn = async (req, res) => {
-    try {
-      const errors = validationResult(req);
-      if (!errors.isEmpty()) {
-        return this.errorResponse(res, 'Validation failed', 400, {
-          errors: errors.array()
-        });
-      }
-
-      const { email, password, phoneNumber } = req.body;
-
-      // Find user by email or phone number
-      const user = await User.findOne({
-        $or: [
-          { email: email?.toLowerCase() },
-          { phoneNumber }
-        ]
+ signIn = async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return this.errorResponse(res, 'Validation failed', 400, {
+        errors: errors.array()
       });
-
-      if (!user) {
-        return this.errorResponse(res, 'Invalid credentials', 401);
-      }
-
-      // Check if user is using local auth
-      if (user.authType !== 'local') {
-        return this.errorResponse(res, 'Please use the appropriate sign-in method', 401);
-      }
-
-      // Check password
-      const isValidPassword = await user.comparePassword(password);
-      if (!isValidPassword) {
-        return this.errorResponse(res, 'Invalid credentials', 401);
-      }
-
-      // Generate tokens
-      const token = this.generateToken(user._id);
-      const refreshToken = this.generateRefreshToken(user._id);
-
-      return this.successResponse(res, 'Sign in successful', {
-        user: user.toJSON(),
-        token,
-        refreshToken
-      });
-
-    } catch (error) {
-      console.error('Sign in error:', error);
-      return this.errorResponse(res, 'An error occurred during sign in', 500);
     }
+
+    const { email, password, phoneNumber } = req.body;
+
+    console.log('sign in request body', req.body);
+
+    // Build query conditions - only include phoneNumber if provided
+    const queryConditions = [];
+    
+    if (email) {
+      queryConditions.push({ email: email.toLowerCase() });
+    }
+    
+    if (phoneNumber) {
+      queryConditions.push({ phoneNumber });
+    }
+
+    if (queryConditions.length === 0) {
+      return this.errorResponse(res, 'Email or phone number is required', 400);
+    }
+
+    // Find user by email or phone number
+    const user = await User.findOne({
+      $or: queryConditions
+    });
+
+    if (!user) {
+      return this.errorResponse(res, 'Invalid credentials', 401);
+    }
+
+    console.log('retrieved user during sign in', user);
+
+    // Check if user is using local auth
+    if (user.authType !== 'local') {
+      return this.errorResponse(res, 'Please use the appropriate sign-in method', 401);
+    }
+
+    // Check password
+    const isValidPassword = await user.comparePassword(password);
+    if (!isValidPassword) {
+      console.log('password is not valid');
+      return this.errorResponse(res, 'Invalid credentials', 401);
+    }
+
+    // Generate tokens
+    const token = this.generateToken(user._id);
+    const refreshToken = this.generateRefreshToken(user._id);
+    
+    console.log('successful logged in', user);
+    return this.successResponse(res, 'Sign in successful', {
+      user: user.toJSON(),
+      token,
+      refreshToken
+    });
+
+  } catch (error) {
+    console.error('Sign in error:', error);
+    return this.errorResponse(res, 'An error occurred during sign in', 500);
   }
+}
 
   deleteAll = async()=>{
     try{
@@ -523,7 +618,7 @@ getUserServices = async (req, res) => {
   // Get current user with settings and services
   getCurrentUser = async (req, res) => {
     try {
-      console.log('Get current user request:', req.user);
+     // console.log('Get current user request:', req.user);
       const userId = req.user.userId;
 
       const user = await User.findById(userId);
@@ -540,8 +635,8 @@ getUserServices = async (req, res) => {
 
       // Get user services
       const userServices = await UserService.getUserServices(userId);
-      console.log('User services retrieved:', userServices);
-      console.log('User settings retrieved:', settings);
+      //console.log('User services retrieved:', userServices);
+      //console.log('User settings retrieved:', settings);
 
       return this.successResponse(res, 'User retrieved successfully', {
         user: user.toJSON(),
@@ -937,6 +1032,108 @@ getUserServices = async (req, res) => {
     }
   }
 
+  // Search users by email (for adding members)
+searchUserByEmail = async (req, res) => {
+  try {
+    const { email } = req.query;
+
+    if (!email) {
+      return this.errorResponse(res, 'Email is required', 400);
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase() })
+      .select('name email profilePicture role');
+
+    if (!user) {
+      return this.errorResponse(res, 'User not found with this email', 404);
+    }
+
+    return this.successResponse(res, 'User found', {
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        profilePicture: user.profilePicture,
+        role: user.role
+      }
+    });
+
+  } catch (error) {
+    console.error('Search user by email error:', error);
+    return this.errorResponse(res, 'An error occurred while searching for user', 500);
+  }
+};
+
+
+  // Get user by ID (for profile member display)
+getUserById = async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    if (!userId) {
+      return this.errorResponse(res, 'User ID is required', 400);
+    }
+
+    const user = await User.findById(userId)
+      .select('name email profilePicture role createdAt'); // Only return necessary fields
+
+    if (!user) {
+      return this.errorResponse(res, 'User not found', 404);
+    }
+
+    return this.successResponse(res, 'User retrieved successfully', {
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        profilePicture: user.profilePicture,
+        role: user.role,
+        createdAt: user.createdAt
+      }
+    });
+
+  } catch (error) {
+    console.error('Get user by ID error:', error);
+    return this.errorResponse(res, 'An error occurred while retrieving user', 500);
+  }
+};
+
+// Get multiple users by IDs (batch fetch for profile members)
+getUsersByIds = async (req, res) => {
+  try {
+    const { userIds } = req.body; // Expect array of user IDs
+
+    if (!userIds || !Array.isArray(userIds)) {
+      return this.errorResponse(res, 'User IDs array is required', 400);
+    }
+
+    const users = await User.find({ _id: { $in: userIds } })
+      .select('name email profilePicture role createdAt');
+
+    // Create a map for easy lookup
+    const usersMap = {};
+    users.forEach(user => {
+      usersMap[user._id.toString()] = {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        profilePicture: user.profilePicture,
+        role: user.role,
+        createdAt: user.createdAt
+      };
+    });
+
+    return this.successResponse(res, 'Users retrieved successfully', {
+      users: usersMap,
+      count: users.length
+    });
+
+  } catch (error) {
+    console.error('Get users by IDs error:', error);
+    return this.errorResponse(res, 'An error occurred while retrieving users', 500);
+  }
+};
+
   // Remove linked account
   removeLinkAccount = async (req, res) => {
     try {
@@ -1052,6 +1249,437 @@ getUserServices = async (req, res) => {
       return this.errorResponse(res, 'An error occurred while retrieving linked accounts', 500);
     }
   }
+
+  // ==========================================
+// BUYER-SPECIFIC CONTROLLER METHODS
+// ==========================================
+
+// Switch to buyer mode
+switchToBuyerMode = async (req, res) => {
+  try { 
+    console.log('req.body in switching profile', req.body);
+    const userId = req.user.userId;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return this.errorResponse(res, 'User not found', 404);
+    }
+
+    await user.switchToBuyerMode();
+
+    return this.successResponse(res, 'Switched to buyer mode successfully', {
+      user: user.toJSON()
+    });
+
+  } catch (error) {
+    console.log('switch to buyer error', error);
+    console.error('Switch to buyer mode error:', error);
+    return this.errorResponse(res, 'An error occurred while switching to buyer mode', 500);
+  }
+};
+
+
+
+getUserByEmail = async (req, res) => {
+  try {
+    const { email } = req.params;
+
+    console.log('🔍 Fetching user by email:', email);
+
+    // Find user by email
+    const user = await User.findOne({ email: email.toLowerCase() })
+      .select('name email profilePicture phoneNumber createdAt')
+      .lean();
+
+    if (!user) {
+      console.log('❌ User not found:', email);
+      return res.status(404).json({
+        success: false,
+        message: 'User not found',
+      });
+    }
+
+    console.log('✅ User found:', user.name);
+
+    res.status(200).json({
+      success: true,
+      user: {
+        id: user._id.toString(),
+        _id: user._id.toString(),
+        name: user.name,
+        email: user.email,
+        profilePicture: user.profilePicture,
+        phoneNumber: user.phoneNumber,
+        createdAt: user.createdAt,
+      },
+    });
+  } catch (error) {
+    console.error('❌ Error fetching user by email:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching user',
+      error: error.message,
+    });
+  }
+};
+
+// Switch to seller mode
+switchToSellerMode = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return this.errorResponse(res, 'User not found', 404);
+    }
+
+    await user.switchToSellerMode();
+
+    return this.successResponse(res, 'Switched to seller mode successfully', {
+      user: user.toJSON()
+    });
+
+  } catch (error) {
+    console.error('Switch to seller mode error:', error);
+    return this.errorResponse(res, 'An error occurred while switching to seller mode', 500);
+  }
+};
+
+// Add item to wishlist
+addToWishlist = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { itemId } = req.body;
+
+    if (!itemId) {
+      return this.errorResponse(res, 'Item ID is required', 400);
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return this.errorResponse(res, 'User not found', 404);
+    }
+
+    await user.addToWishlist(itemId);
+
+    return this.successResponse(res, 'Item added to wishlist successfully', {
+      user: user.toJSON()
+    });
+
+  } catch (error) {
+    console.error('Add to wishlist error:', error);
+    return this.errorResponse(res, 'An error occurred while adding to wishlist', 500);
+  }
+};
+
+// Remove item from wishlist
+removeFromWishlist = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { itemId } = req.params;
+
+    if (!itemId) {
+      return this.errorResponse(res, 'Item ID is required', 400);
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return this.errorResponse(res, 'User not found', 404);
+    }
+
+    await user.removeFromWishlist(itemId);
+
+    return this.successResponse(res, 'Item removed from wishlist successfully', {
+      user: user.toJSON()
+    });
+
+  } catch (error) {
+    console.error('Remove from wishlist error:', error);
+    return this.errorResponse(res, 'An error occurred while removing from wishlist', 500);
+  }
+};
+
+// Add item to cart
+addToCart = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { itemId } = req.body;
+
+    if (!itemId) {
+      return this.errorResponse(res, 'Item ID is required', 400);
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return this.errorResponse(res, 'User not found', 404);
+    }
+
+    await user.addToCart(itemId);
+
+    return this.successResponse(res, 'Item added to cart successfully', {
+      user: user.toJSON()
+    });
+
+  } catch (error) {
+    console.error('Add to cart error:', error);
+    return this.errorResponse(res, 'An error occurred while adding to cart', 500);
+  }
+};
+
+// Remove item from cart
+removeFromCart = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { itemId } = req.params;
+
+    if (!itemId) {
+      return this.errorResponse(res, 'Item ID is required', 400);
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return this.errorResponse(res, 'User not found', 404);
+    }
+
+    await user.removeFromCart(itemId);
+
+    return this.successResponse(res, 'Item removed from cart successfully', {
+      user: user.toJSON()
+    });
+
+  } catch (error) {
+    console.error('Remove from cart error:', error);
+    return this.errorResponse(res, 'An error occurred while removing from cart', 500);
+  }
+};
+
+// Clear cart
+clearCart = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return this.errorResponse(res, 'User not found', 404);
+    }
+
+    await user.clearCart();
+
+    return this.successResponse(res, 'Cart cleared successfully', {
+      user: user.toJSON()
+    });
+
+  } catch (error) {
+    console.error('Clear cart error:', error);
+    return this.errorResponse(res, 'An error occurred while clearing cart', 500);
+  }
+};
+
+// Record a purchase
+recordPurchase = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { itemId } = req.body;
+
+    if (!itemId) {
+      return this.errorResponse(res, 'Item ID is required', 400);
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return this.errorResponse(res, 'User not found', 404);
+    }
+
+    await user.addPurchase(itemId);
+
+    return this.successResponse(res, 'Purchase recorded successfully', {
+      user: user.toJSON()
+    });
+
+  } catch (error) {
+    console.error('Record purchase error:', error);
+    return this.errorResponse(res, 'An error occurred while recording purchase', 500);
+  }
+};
+
+// Mark item as reviewed
+markAsReviewed = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { itemId, rating } = req.body;
+
+    if (!itemId) {
+      return this.errorResponse(res, 'Item ID is required', 400);
+    }
+
+    if (!rating || rating < 1 || rating > 5) {
+      return this.errorResponse(res, 'Valid rating (1-5) is required', 400);
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return this.errorResponse(res, 'User not found', 404);
+    }
+
+    await user.markAsReviewed(itemId);
+    await user.updateBuyerRating(rating);
+
+    return this.successResponse(res, 'Item marked as reviewed successfully', {
+      user: user.toJSON()
+    });
+
+  } catch (error) {
+    console.error('Mark as reviewed error:', error);
+    return this.errorResponse(res, 'An error occurred while marking as reviewed', 500);
+  }
+};
+
+// Update buyer profile
+updateBuyerProfile = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { 
+      preferredCategories, 
+      savedAddresses, 
+      defaultShippingAddress, 
+      defaultBillingAddress 
+    } = req.body;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return this.errorResponse(res, 'User not found', 404);
+    }
+
+    // Initialize buyer profile if it doesn't exist
+    if (!user.buyerProfile) {
+      user.buyerProfile = {
+        preferredCategories: [],
+        savedAddresses: [],
+        totalPurchases: 0,
+        totalReviews: 0,
+        averageRatingGiven: 0,
+        isVerifiedBuyer: false,
+        verifiedPurchaseCount: 0
+      };
+    }
+
+    // Update buyer profile fields
+    if (preferredCategories !== undefined) {
+      user.buyerProfile.preferredCategories = preferredCategories;
+    }
+    if (savedAddresses !== undefined) {
+      user.buyerProfile.savedAddresses = savedAddresses;
+    }
+    if (defaultShippingAddress !== undefined) {
+      user.buyerProfile.defaultShippingAddress = defaultShippingAddress;
+    }
+    if (defaultBillingAddress !== undefined) {
+      user.buyerProfile.defaultBillingAddress = defaultBillingAddress;
+    }
+
+    await user.save();
+
+    return this.successResponse(res, 'Buyer profile updated successfully', {
+      user: user.toJSON()
+    });
+
+  } catch (error) {
+    console.error('Update buyer profile error:', error);
+    return this.errorResponse(res, 'An error occurred while updating buyer profile', 500);
+  }
+};
+
+// Get user's wishlist items (populated)
+getWishlist = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+
+    const user = await User.findById(userId).populate('wishlistItemIds');
+    if (!user) {
+      return this.errorResponse(res, 'User not found', 404);
+    }
+
+    return this.successResponse(res, 'Wishlist retrieved successfully', {
+      items: user.wishlistItemIds,
+      count: user.wishlistItemIds.length
+    });
+
+  } catch (error) {
+    console.error('Get wishlist error:', error);
+    return this.errorResponse(res, 'An error occurred while retrieving wishlist', 500);
+  }
+};
+
+// Get user's cart items (populated)
+getCart = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+
+    const user = await User.findById(userId).populate('cartItemIds');
+    if (!user) {
+      return this.errorResponse(res, 'User not found', 404);
+    }
+
+    return this.successResponse(res, 'Cart retrieved successfully', {
+      items: user.cartItemIds,
+      count: user.cartItemIds.length
+    });
+
+  } catch (error) {
+    console.error('Get cart error:', error);
+    return this.errorResponse(res, 'An error occurred while retrieving cart', 500);
+  }
+};
+
+// Get user's purchase history (populated)
+getPurchaseHistory = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+
+    const user = await User.findById(userId).populate('purchaseHistoryIds');
+    if (!user) {
+      return this.errorResponse(res, 'User not found', 404);
+    }
+
+    return this.successResponse(res, 'Purchase history retrieved successfully', {
+      items: user.purchaseHistoryIds,
+      count: user.purchaseHistoryIds.length,
+      totalPurchases: user.buyerProfile?.totalPurchases || 0
+    });
+
+  } catch (error) {
+    console.error('Get purchase history error:', error);
+    return this.errorResponse(res, 'An error occurred while retrieving purchase history', 500);
+  }
+};
+
+// Check if user can review an item
+canReviewItem = async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { itemId } = req.params;
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return this.errorResponse(res, 'User not found', 404);
+    }
+
+    const canReview = user.canReview(itemId);
+    const hasPurchased = user.hasPurchased(itemId);
+    const hasReviewed = user.hasReviewed(itemId);
+
+    return this.successResponse(res, 'Review eligibility checked', {
+      canReview,
+      hasPurchased,
+      hasReviewed,
+      isVerifiedBuyer: user.buyerProfile?.isVerifiedBuyer || false
+    });
+
+  } catch (error) {
+    console.error('Can review item error:', error);
+    return this.errorResponse(res, 'An error occurred while checking review eligibility', 500);
+  }
+};
 }
 
 module.exports = new UserController();

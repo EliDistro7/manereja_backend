@@ -429,6 +429,49 @@ const getUserById = async (req, res) => {
     }
 };
 
+const getUserByEmail = async (req, res) => {
+  try {
+    const { email } = req.params;
+
+    console.log('🔍 Fetching user by email:', email);
+
+    // Find user by email
+    const user = await User.findOne({ email: email.toLowerCase() })
+      .select('name email profilePicture phoneNumber createdAt')
+      .lean();
+
+    if (!user) {
+      console.log('❌ User not found:', email);
+      return res.status(404).json({
+        success: false,
+        message: 'User not found',
+      });
+    }
+
+    console.log('✅ User found:', user.name);
+
+    res.status(200).json({
+      success: true,
+      user: {
+        id: user._id.toString(),
+        _id: user._id.toString(),
+        name: user.name,
+        email: user.email,
+        profilePicture: user.profilePicture,
+        phoneNumber: user.phoneNumber,
+        createdAt: user.createdAt,
+      },
+    });
+  } catch (error) {
+    console.error('❌ Error fetching user by email:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while fetching user',
+      error: error.message,
+    });
+  }
+};
+
 // Controller for user registration (sign-up)
 const userRegister = async (req, res) => {
   try {

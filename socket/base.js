@@ -1,199 +1,301 @@
-
-
 const socketIo = require('socket.io');
 
-const messageEvents = require('./events/messageEvents'); 
-//const roomEvents = require('./events/roomEvents');
-const searchEvents = require('./events/searchEvents');
-//const audio2Events = require('./events/audio2');
-
+const messageEvents = require('./events/messageEvents');
+const orderEvents = require('./events/orderEvents');
+const taskerEvents = require('./events/taskerEvents');
 const NotificationsEvents = require('./events/NotificationsEvents');
-
 const CashflowEvents = require('./events/CashflowEvents.js');
+const taskerReportingEvents = require('./events/taskerReportingEvents.js');
+const taskerReportSubmissionEvents = require('./events/taskerSubmissionEvents.js');
+const profileSyncEvents = require('./events/profileSyncEvents.js');
+const packageNotificationService  = require('./events/packageNotificationService.js');
 
-//const room2 = require('./events/room2');
-const User = require("../models/manereja/user.js");
-//const taggingUser = require('./events/taggingUser');
-const audio3 = require('./events/audio3');
+
+const User = require('../models/manereja/user.js');
 
 const getUserDetails = async (userId) => {
-  return await User.findById(userId);  // Assuming you have a generic User schema/model
+  return await User.findById(userId);
 };
 
 let io;
-const userSockets = {}; // Object to store userId-socketId mapping
-const roomSocketsMap = {}; // Object to store roomId-socketId mapping
-const liveRoomsNow = [];
 
-const activeRoomMembers = []
-const onlineUsers = []; // Array to store online registered users
-const guestUsers = []; // Array to store guest user socket IDs
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared state
+//
+//  userSockets      – multi-tab safe: userId → Set<socketId>
+//
+//  socketToUser     – reverse map: socketId → userId  (O(1) lookup)
+//                     always kept in sync with userSockets via helpers below
+//
+//  roomSocketsMap   – ONLY used by profileSyncEvents
+//                     shape: { 'profile_<id>': { userIds: Set, socketToUser: Map } }
+//
+//  liveRoomsMap     – ONLY used by createRoom / live-room features
+//                     shape: { userId: [socketId, memberObject] }
+//
+//  onlineUsers      – array of user objects currently online
+//  guestUsers       – array of guest socket IDs
+// ─────────────────────────────────────────────────────────────────────────────
+const userSockets    = {};  // userId  → Set<socketId>
+const socketToUser   = {};  // socketId → userId  (reverse map — never mutate directly)
+const roomSocketsMap = {};  // profile sync rooms only
+const liveRoomsMap   = {};  // live audio/video rooms only
+const onlineUsers    = [];
+const guestUsers     = [];
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+/** Add a socket; keeps both maps in sync atomically */
+function _addUserSocket(userId, socketId) {
+  if (!userSockets[userId]) userSockets[userId] = new Set();
+  userSockets[userId].add(socketId);
+  socketToUser[socketId] = userId;
+}
+
+/** Remove a socket; keeps both maps in sync atomically */
+function _removeUserSocket(userId, socketId) {
+  if (userSockets[userId]) {
+    userSockets[userId].delete(socketId);
+    if (userSockets[userId].size === 0) {
+      delete userSockets[userId];
+    }
+  }
+  delete socketToUser[socketId];
+}
+
+/**
+ * Find which userId owns a given socketId — O(1) via reverse map.
+ * Returns undefined when not found.
+ */
+function _userIdForSocket(socketId) {
+  return socketToUser[socketId];
+}
+
+/**
+ * Emit to ALL active sockets of a user (multi-tab safe).
+ * Returns true if the user had at least one socket to send to.
+ */
+function _emitToUser(userId, event, data) {
+  const sockets = userSockets[userId];
+  if (!sockets || sockets.size === 0) return false;
+  for (const socketId of sockets) {
+    io.to(socketId).emit(event, data);
+  }
+  return true;
+}
+
+/**
+ * Clean up all profile rooms for a disconnecting socketId.
+ */
+function _cleanupProfileRooms(socketId) {
+  for (const roomName in roomSocketsMap) {
+    if (!roomName.startsWith('profile_')) continue;
+
+    const room = roomSocketsMap[roomName];
+    if (!room.socketToUser.has(socketId)) continue;
+
+    const userId = room.socketToUser.get(socketId);
+    room.socketToUser.delete(socketId);
+
+    const stillConnected = [...room.socketToUser.values()].includes(userId);
+    if (!stillConnected) {
+      room.userIds.delete(userId);
+
+      const profileId = roomName.replace('profile_', '');
+      io.to(roomName).emit('member_disconnected', {
+        userId,
+        profileId,
+        timestamp: new Date(),
+      });
+      console.log(`🔌 User ${userId} disconnected from ${roomName}`);
+    } else {
+      console.log(`ℹ️  User ${userId} still has another socket in ${roomName} — staying online`);
+    }
+
+    if (room.userIds.size === 0) {
+      delete roomSocketsMap[roomName];
+      console.log(`🗑️  Removed empty room: ${roomName}`);
+    }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 function initSocket(server) {
   io = socketIo(server, {
     cors: {
-      origin: process.env.ORIGIN, // Adjust this to match your client-side domain
+      origin: process.env.ORIGIN,
       methods: ['GET', 'POST'],
-      pingInterval: 10000, // Set ping interval for detecting dead connections
-      pingTimeout: 5000,   // Timeout to wait for pong response
+      pingInterval: 10000,
+      pingTimeout: 5000,
     },
   });
 
   console.log('Socket.io initialized');
 
   io.on('connection', (socket) => {
-  
-console.log('socket connected');
-    // Handle guest users (unregistered users)
+    console.log('socket connected:', socket.id);
+
+    // ── Guest users ───────────────────────────────────────────────────────
     socket.on('guestUser', () => {
-
-      
-      guestUsers.push(socket.id); // Add guest user to guestUsers array
-
-      // Emit event to notify all clients that a guest user is online
+      guestUsers.push(socket.id);
       io.emit('guestUserConnected', { socketId: socket.id });
-
-      // Acknowledge guest user connection
       socket.emit('guestUserAck', { status: 'ok' });
     });
 
-    // Handle registered/logged-in users
+    // ── Registered users ──────────────────────────────────────────────────
     socket.on('loginUser', async ({ userId }) => {
-     
-      try { console.log('new user connected trhough login user event', userId);
-        console.log('userSockets now', userSockets);
+      try {
+        console.log(`👤 User ${userId} connected via socket ${socket.id}`);
+
         const userDetails = await getUserDetails(userId);
-       console.log('user details', userDetails);
 
-          // Notify the old session to log  out if the user is already connected
-          if (userSockets[userId]) {
-            io.to(userSockets[userId]).emit('loggedOut');
-            console.log(`User ${userId} logged out from socket ID: ${userSockets[userId]}`);
-          }
+        _addUserSocket(userId, socket.id);
 
-            // Map userId to the new socket.id
-  userSockets[userId] = socket.id;
-  console.log('sockets now', userSockets);
+        const userWithSocket = {
+          ...userDetails._doc,
+          socketId: socket.id,
+        };
 
-  // Add the socket ID to the userDetails object
-  const userWithSocket = {
-    ...userDetails._doc,  // Spread user details (assuming it's a Mongoose document)
-    socketId: socket.id   // Add the socket ID to the user object
-  };
-
-          onlineUsers.push(userWithSocket); // Add the user to the onlineUsers array
-        
-
-          // Emit event to all clients about the new online user
+        const alreadyOnline = onlineUsers.some(u => u._id?.toString() === userId);
+        if (!alreadyOnline) {
+          onlineUsers.push(userWithSocket);
           io.emit('userConnected', { user: userWithSocket });
+        }
 
-          // Acknowledge the login event
-          socket.emit('loginUserAck', { status: 'ok', user: userDetails });
-         
+        socket.emit('loginUserAck', { status: 'ok', user: userDetails });
+
+        console.log(`✅ userSockets[${userId}] has ${userSockets[userId].size} socket(s)`);
       } catch (error) {
         console.error('Error fetching user details:', error);
-        socket.emit('loginUserAck', { status: 'error', message: 'Error retrieving user data' });
+        socket.emit('loginUserAck', {
+          status: 'error',
+          message: 'Error retrieving user data',
+        });
       }
     });
 
-    socket.on('createRoom',async ({roomId})=>{
-      let userId=roomId;
-      console.log('is creating room with is', userId)
-     
-        try {
-          if(roomSocketsMap[userId]) return;
-          
-          const userDetails = await getUserDetails(userId);
-          userDetails.password = undefined;
-  
-              // Map userId to the new socket.id
-             
+    // ── Logout ────────────────────────────────────────────────────────────
+    socket.on('logoutUser', ({ userId }) => {
+      try {
+        console.log(`📤 User ${userId} is logging out from socket ${socket.id}`);
 
-    roomSocketsMap[userId] = [socket.id,{ socket:socket.id, userId:userId, ...userDetails._doc, isSpeaker:true}];
-    io.to(userSockets[userId]).emit('assignedRole', { role: 'speaker' });
-    
-    console.log("RoomSocketsMap", roomSocketsMap);
-  
-    // Add the socket ID to the userDetails object
-    const userWithRoomSocket = {
-      ...userDetails._doc,  // Spread user details (assuming it's a Mongoose document)
-      socketId: socket.id   // Add the socket ID to the user object
-    };
-  
-            activeRoomMembers.push(userWithRoomSocket); // Add the user to the onlineUsers array
-            io.to(roomSocketsMap[userId][0]).emit('assignedRole', { role: 'speaker' });
+        _removeUserSocket(userId, socket.id);
 
-            // Emit to the room that a user has joined and update the list of users in the room
-           io.to(roomSocketsMap[roomId][0]).emit('updateRoomUsers', roomSocketsMap[userId]);
-            
-          
-        } catch (error) {
-          console.error('Error fetching user details:', error);
-          socket.emit('loginUserAck', { status: 'error', message: 'Error retrieving user data' });
+        if (!userSockets[userId]) {
+          const idx = onlineUsers.findIndex(u => u._id?.toString() === userId);
+          if (idx !== -1) onlineUsers.splice(idx, 1);
+          io.emit('userLoggedOut', { userId, socketId: socket.id });
+          console.log(`✅ User ${userId} fully logged out — no sockets remain`);
+        } else {
+          console.log(
+            `ℹ️  User ${userId} still has ${userSockets[userId].size} other socket(s) open`,
+          );
         }
-      
 
-    })
+        socket.emit('logoutUserAck', { status: 'ok' });
+      } catch (error) {
+        console.error('Error handling user logout:', error);
+        socket.emit('logoutUserAck', {
+          status: 'error',
+          message: 'Error during logout',
+        });
+      }
+    });
 
-    // Handle the event to check for online users
+    // ── Live rooms (audio/video) ──────────────────────────────────────────
+    socket.on('createRoom', async ({ roomId }) => {
+      const userId = roomId;
+      console.log('Creating live room with id', userId);
+
+      try {
+        if (liveRoomsMap[userId]) return;
+
+        const userDetails = await getUserDetails(userId);
+        userDetails.password = undefined;
+
+        liveRoomsMap[userId] = [
+          socket.id,
+          {
+            socket:    socket.id,
+            userId:    userId,
+            ...userDetails._doc,
+            isSpeaker: true,
+          },
+        ];
+
+        io.to(socket.id).emit('assignedRole', { role: 'speaker' });
+        io.to(socket.id).emit('updateRoomUsers', liveRoomsMap[userId]);
+      } catch (error) {
+        console.error('Error creating live room:', error);
+        socket.emit('loginUserAck', {
+          status: 'error',
+          message: 'Error retrieving user data',
+        });
+      }
+    });
+
+    // ── Presence queries ──────────────────────────────────────────────────
     socket.on('checkOnlineUsers', () => {
-      // Respond with both registered and guest online users
-      socket.emit('onlineUsersResponse', { registeredUsers: onlineUsers, guestUsers });
+      socket.emit('onlineUsersResponse', {
+        registeredUsers: onlineUsers,
+        guestUsers,
+      });
     });
+
     socket.on('checkLiveGroups', () => {
-         // Respond with both registered and guest online users
-      socket.emit('liveGroupsResponse', { liveGroupsNow: roomSocketsMap });
+      socket.emit('liveGroupsResponse', { liveGroupsNow: liveRoomsMap });
     });
 
-    // Initialize message-related events
-    messageEvents(io, socket, userSockets);
+    // ── Feature event handlers ────────────────────────────────────────────
+    // socketToUser is passed so event modules can do O(1) userId lookups
+    messageEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
+    taskerReportSubmissionEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
+    profileSyncEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
+    orderEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
+    taskerEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
+    taskerReportingEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
+    NotificationsEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
+    CashflowEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
 
-  
-
-    NotificationsEvents(io, socket, userSockets);
-
-    CashflowEvents(io, socket, userSockets);
-  
-    // Handle user disconnection
+    // ── Single, authoritative disconnect handler ──────────────────────────
     socket.on('disconnect', () => {
-      console.log('User disconnected:', socket.id);
+      console.log(`🔌 Socket disconnected: ${socket.id}`);
 
+      const userId = _userIdForSocket(socket.id);  // O(1) — uses reverse map
 
+      if (userId) {
+        _removeUserSocket(userId, socket.id);
 
-      // Find and remove the disconnected user's socketId from the mapping
-      for (const userId in userSockets) {
-        if (userSockets[userId] === socket.id) {
-      
-          delete userSockets[userId]; // Clean up the mapping on disconnect
-          // Remove user from the onlineUsers array
-          onlineUsers.splice(onlineUsers.findIndex(u => u._id === userId), 1);
-          break; // Exit the loop once the user is found and removed
+        if (!userSockets[userId]) {
+          const idx = onlineUsers.findIndex(u => u._id?.toString() === userId);
+          if (idx !== -1) onlineUsers.splice(idx, 1);
+          console.log(`✅ User ${userId} is now fully offline`);
+        } else {
+          console.log(
+            `ℹ️  User ${userId} still has ${userSockets[userId].size} socket(s) — staying online`,
+          );
         }
       }
 
-      // Remove guest user from the guestUsers array
-      const guestIndex = guestUsers.indexOf(socket.id);
-      if (guestIndex !== -1) {
-        guestUsers.splice(guestIndex, 1);
+      _cleanupProfileRooms(socket.id);
+
+      const guestIdx = guestUsers.indexOf(socket.id);
+      if (guestIdx !== -1) {
+        guestUsers.splice(guestIdx, 1);
+        console.log(`✅ Removed guest ${socket.id}`);
       }
 
-      // Emit an event to notify all clients about the disconnection
       io.emit('userDisconnected', { socketId: socket.id });
     });
   });
 
-  return io; // Return the initialized socket instance
-}
-
-// Function to get the current io instance
-function getIo() {
-  if (!io) {
-    throw new Error('Socket.io not initialized!');
-  }
   return io;
 }
 
-module.exports = {
-  initSocket,
-  getIo,
-};
+function getIo() {
+  if (!io) throw new Error('Socket.io not initialized!');
+  return io;
+}
+
+module.exports = { initSocket, getIo };

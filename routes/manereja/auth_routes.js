@@ -5,7 +5,18 @@ const { authenticateToken, optionalAuth } = require('../../middleware/auth'); //
 
 const router = express.Router();
 
-
+// ✅ Validation error handler
+const handleValidationErrors = (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({
+      success: false,
+      message: 'Validation failed',
+      errors: errors.array()
+    });
+  }
+  next();
+};
 
 // Validation middleware
 const signUpValidation = [
@@ -140,6 +151,23 @@ const removeLinkAccountValidation = [
     .withMessage('Linked user ID must be a valid MongoDB ObjectId')
 ];
 
+// ✅ NEW: Buyer validations
+const buyerProfileValidation = [
+  body('preferredCategories').optional().isArray(),
+  body('savedAddresses').optional().isArray(),
+  body('defaultShippingAddress').optional().isString(),
+  body('defaultBillingAddress').optional().isString()
+];
+
+const itemIdValidation = [
+  body('itemId').notEmpty().isMongoId()
+];
+
+const reviewValidation = [
+  body('itemId').notEmpty().isMongoId(),
+  body('rating').notEmpty().isFloat({ min: 1, max: 5 })
+];
+
 // Public routes (no authentication required)
 router.post('/signup', signUpValidation, userController.signUp);
 router.post('/signin', signInValidation, userController.signIn);
@@ -162,6 +190,7 @@ router.post('/link-request', authenticateToken, linkRequestValidation, userContr
 router.post('/respond-link-request', authenticateToken, respondToLinkRequestValidation, userController.respondToLinkRequest);
 router.delete('/remove-link', authenticateToken, removeLinkAccountValidation, userController.removeLinkAccount);
 router.get('/linked-accounts', authenticateToken, userController.getLinkedAccounts);
+router.patch('/profile/switch',authenticateToken, userController.switchActiveProfile);
 
 // Additional utility routes
 router.get('/refresh-token', authenticateToken, async (req, res) => {
@@ -185,4 +214,42 @@ router.get('/refresh-token', authenticateToken, async (req, res) => {
   }
 });
 
+
+router.get('/users/search', authenticateToken, userController.searchUserByEmail);
+
+// Public route - get user by ID
+router.get('/users/:userId', authenticateToken, userController.getUserById);
+
+router.get('/users/email/:email', authenticateToken, userController.getUserByEmail);
+
+// Protected route - batch get users by IDs
+router.post('/users/batch', authenticateToken, userController.getUsersByIds);
+
+// ==========================================
+// BUYER ROUTES - PROPERLY ORDERED
+// ==========================================
+
+// Context switching (no validation needed)
+router.patch('/context/buyer', authenticateToken, userController.switchToBuyerMode);
+router.patch('/context/seller', authenticateToken, userController.switchToSellerMode);
+
+// Wishlist
+router.post('/wishlist/add', authenticateToken, itemIdValidation, handleValidationErrors, userController.addToWishlist);
+router.delete('/wishlist/remove/:itemId', authenticateToken, userController.removeFromWishlist);
+router.get('/wishlist', authenticateToken, userController.getWishlist);
+
+// Cart
+router.post('/cart/add', authenticateToken, itemIdValidation, handleValidationErrors, userController.addToCart);
+router.delete('/cart/remove/:itemId', authenticateToken, userController.removeFromCart);
+router.delete('/cart/clear', authenticateToken, userController.clearCart);
+router.get('/cart', authenticateToken, userController.getCart);
+
+// Purchases & Reviews
+router.post('/purchases/record', authenticateToken, itemIdValidation, handleValidationErrors, userController.recordPurchase);
+router.get('/purchases/history', authenticateToken, userController.getPurchaseHistory);
+router.post('/reviews/mark', authenticateToken, reviewValidation, handleValidationErrors, userController.markAsReviewed);
+router.get('/reviews/can-review/:itemId', authenticateToken, userController.canReviewItem);
+
+// Buyer Profile
+router.patch('/buyer-profile', authenticateToken, buyerProfileValidation, handleValidationErrors, userController.updateBuyerProfile);
 module.exports = router;

@@ -29,10 +29,13 @@ const authenticateToken = async (req, res, next) => {
       });
     }
 
+    //console.log('authetincated user', user);
+
     // Add user info to request
     req.user = {
       userId: decoded.userId,
-      user: user
+      user: user,
+      id:decoded.userId,
     };
 
     next();

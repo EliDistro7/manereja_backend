@@ -1,11 +1,111 @@
 // backend/routes/manereja/sync-routes.js
 const express = require('express');
 const router = express.Router();
-// Import authentication middleware
 const { authenticateToken } = require('../../middleware/auth');
-
-// Import UserBackup model
 const UserBackup = require('../../models/manereja/user-backup');
+
+// ============================================
+// HELPER FUNCTIONS
+// ============================================
+
+
+/**
+ * Clean data by removing Mongoose/MongoDB internal properties
+ * Converts Maps to plain objects recursively
+ */
+function cleanData(data) {
+  if (!data || typeof data !== 'object') {
+    return data;
+  }
+
+  // Handle arrays
+  if (Array.isArray(data)) {
+    return data.map(item => cleanData(item));
+  }
+
+  // Convert to plain object and remove $ prefixed keys
+  const cleaned = {};
+  const plainData = data.toObject ? data.toObject() : data;
+
+  for (const [key, value] of Object.entries(plainData)) {
+    // Skip MongoDB internal properties
+    if (key.startsWith('$') || key.startsWith('_')) {
+      continue;
+    }
+
+    // Recursively clean nested objects
+    if (value && typeof value === 'object') {
+      cleaned[key] = cleanData(value);
+    } else {
+      cleaned[key] = value;
+    }
+  }
+
+  return cleaned;
+}
+
+/**
+ * Merge local and cloud data with conflict resolution
+ */
+function mergeData(localData, cloudData, options = {}) {
+  const { preferCloud = false } = options;
+  
+  // Clean both datasets first
+  const cleanLocal = cleanData(localData);
+  const cleanCloud = cleanData(cloudData);
+  
+  const merged = {};
+
+  // Get all unique box names
+  const allBoxNames = new Set([
+    ...Object.keys(cleanLocal || {}),
+    ...Object.keys(cleanCloud || {}),
+  ]);
+
+  for (const boxName of allBoxNames) {
+    const local = cleanLocal?.[boxName] || {};
+    const cloud = cleanCloud?.[boxName] || {};
+
+    if (preferCloud) {
+      // Cloud data takes precedence
+      merged[boxName] = { ...local, ...cloud };
+    } else {
+      // Local data takes precedence
+      merged[boxName] = { ...cloud, ...local };
+    }
+  }
+
+  return merged;
+}
+
+// ============================================
+// MIDDLEWARE: Verify Profile Access
+// ============================================
+async function verifyProfileAccess(req, res, next) {
+  try {
+    const userId = req.user.userId;
+    const profileId = req.body.profileId || req.query.profileId;
+
+    if (!profileId) {
+      return res.status(400).json({
+        success: false,
+        message: 'profileId is required',
+      });
+    }
+
+    // Verify user has access to this profile
+    await UserBackup.verifyAccess(userId, profileId);
+    
+    req.profileId = profileId;
+    next();
+  } catch (error) {
+    console.error('❌ Access verification error:', error);
+    res.status(403).json({
+      success: false,
+      message: error.message || 'Access denied to this profile',
+    });
+  }
+}
 
 // ============================================
 // BACKUP ENDPOINT (Hive → MongoDB)
@@ -13,38 +113,42 @@ const UserBackup = require('../../models/manereja/user-backup');
 
 /**
  * POST /api/sync/backup
- * Backup all user's Hive data to MongoDB
+ * Backup profile-specific Hive data to MongoDB
  */
-router.post('/backup', authenticateToken, async (req, res) => {
+router.post('/backup', authenticateToken, verifyProfileAccess, async (req, res) => {
   try {
     const { data, timestamp, version } = req.body;
-    const userId = req.user.userId; // Changed from req.user.id
+    const userId = req.user.userId;
+    const profileId = req.profileId;
 
-    console.log(`☁️ Backing up data for user: ${userId}`);
+    console.log(`☁️ Backing up data for user: ${userId}, profile: ${profileId}`);
 
-    // Create or update user backup
+    // Clean the data before saving
+    const cleanedData = cleanData(data);
+
+    // Create or update profile-specific backup
     const backup = await UserBackup.findOneAndUpdate(
-      { userId },
+      { userId, profileId },
       {
         userId,
-        data,
-        version,
-        lastBackupTime: new Date(timestamp),
+        profileId,
+        data: cleanedData,
+        version: version || '1.0.0',
+        lastBackupTime: timestamp ? new Date(timestamp) : new Date(),
         updatedAt: new Date(),
       },
       { upsert: true, new: true }
     );
 
-    // Calculate stats
-    const stats = calculateBackupStats(data);
-
-    console.log('✅ Backup successful');
+    console.log(`✅ Backup successful for profile: ${profileId}`);
     res.status(200).json({
       success: true,
       message: 'Backup completed successfully',
-      stats,
+      stats: backup.stats,
       backupId: backup._id,
+      profileId: backup.profileId,
       lastBackupTime: backup.lastBackupTime,
+      dataSize: backup.getFormattedSize(),
     });
   } catch (error) {
     console.error('❌ Backup error:', error);
@@ -61,36 +165,38 @@ router.post('/backup', authenticateToken, async (req, res) => {
 // ============================================
 
 /**
- * GET /api/sync/restore
- * Restore user's data from MongoDB
+ * GET /api/sync/restore?profileId=xxx
+ * Restore profile-specific data from MongoDB
  */
-router.get('/restore', authenticateToken, async (req, res) => {
+router.get('/restore', authenticateToken, verifyProfileAccess, async (req, res) => {
   try {
     const userId = req.user.userId;
+    const profileId = req.profileId;
 
-    console.log(`☁️ Restoring data for user: ${userId}`);
+    console.log(`☁️ Restoring data for user: ${userId}, profile: ${profileId}`);
 
-    // Find user's backup
-    const backup = await UserBackup.findOne({ userId });
+    const backup = await UserBackup.findOne({ userId, profileId });
 
     if (!backup) {
       return res.status(404).json({
         success: false,
-        message: 'No backup found for this user',
+        message: `No backup found for profile: ${profileId}`,
       });
     }
 
-    // Calculate stats
-    const stats = calculateBackupStats(backup.data);
+    // Clean the data before sending
+    const cleanedData = cleanData(backup.data);
 
-    console.log('✅ Restore data retrieved');
+    console.log(`✅ Restore data retrieved for profile: ${profileId}`);
     res.status(200).json({
       success: true,
       message: 'Restore data retrieved successfully',
-      data: backup.data,
-      stats,
+      data: cleanedData,
+      stats: backup.stats,
+      profileId: backup.profileId,
       lastBackupTime: backup.lastBackupTime,
       version: backup.version,
+      dataSize: backup.getFormattedSize(),
     });
   } catch (error) {
     console.error('❌ Restore error:', error);
@@ -108,18 +214,19 @@ router.get('/restore', authenticateToken, async (req, res) => {
 
 /**
  * POST /api/sync/smart-sync
- * Smart sync with merge strategy
+ * Smart sync with merge strategy (profile-specific)
  */
-router.post('/smart-sync', authenticateToken, async (req, res) => {
+router.post('/smart-sync', authenticateToken, verifyProfileAccess, async (req, res) => {
   try {
     const { localData, lastSyncTime, preferCloud } = req.body;
     const userId = req.user.userId;
+    const profileId = req.profileId;
 
-    console.log(`🔄 Smart sync for user: ${userId}`);
+    console.log(`🔄 Smart sync for user: ${userId}, profile: ${profileId}`);
 
-    // Get cloud data
-    const backup = await UserBackup.findOne({ userId });
-    const cloudData = backup?.data || {};
+    // Get profile-specific cloud data
+    const backup = await UserBackup.findOne({ userId, profileId });
+    const cloudData = backup?.data ? cleanData(backup.data) : {};
 
     // Merge data based on strategy
     const mergedData = mergeData(localData, cloudData, {
@@ -128,26 +235,27 @@ router.post('/smart-sync', authenticateToken, async (req, res) => {
       preferCloud,
     });
 
-    // Update backup with merged data
-    await UserBackup.findOneAndUpdate(
-      { userId },
+    // Update profile-specific backup with merged data
+    const updatedBackup = await UserBackup.findOneAndUpdate(
+      { userId, profileId },
       {
         userId,
+        profileId,
         data: mergedData,
         lastBackupTime: new Date(),
         updatedAt: new Date(),
       },
-      { upsert: true }
+      { upsert: true, new: true }
     );
 
-    const stats = calculateBackupStats(mergedData);
-
-    console.log('✅ Smart sync completed');
+    console.log(`✅ Smart sync completed for profile: ${profileId}`);
     res.status(200).json({
       success: true,
       message: 'Smart sync completed',
       mergedData,
-      stats,
+      stats: updatedBackup.stats,
+      profileId,
+      dataSize: updatedBackup.getFormattedSize(),
     });
   } catch (error) {
     console.error('❌ Smart sync error:', error);
@@ -165,30 +273,41 @@ router.post('/smart-sync', authenticateToken, async (req, res) => {
 
 /**
  * POST /api/sync/selective
- * Sync only specific boxes
+ * Sync only specific boxes (profile-specific)
  */
-router.post('/selective', authenticateToken, async (req, res) => {
+router.post('/selective', authenticateToken, verifyProfileAccess, async (req, res) => {
   try {
     const { data, boxNames } = req.body;
     const userId = req.user.userId;
+    const profileId = req.profileId;
 
-    console.log(`📦 Selective sync for user: ${userId}, boxes: ${boxNames}`);
+    if (!boxNames || !Array.isArray(boxNames)) {
+      return res.status(400).json({
+        success: false,
+        message: 'boxNames array is required',
+      });
+    }
 
-    // Get existing backup
-    let backup = await UserBackup.findOne({ userId });
+    console.log(`📦 Selective sync for user: ${userId}, profile: ${profileId}, boxes: ${boxNames.join(', ')}`);
+
+    // Clean the incoming data
+    const cleanedData = cleanData(data);
+
+    // Get existing profile-specific backup
+    let backup = await UserBackup.findOne({ userId, profileId });
     
     if (!backup) {
-      // Create new backup
       backup = new UserBackup({
         userId,
+        profileId,
         data: {},
       });
     }
 
     // Update only selected boxes
     boxNames.forEach(boxName => {
-      if (data[boxName]) {
-        backup.data[boxName] = data[boxName];
+      if (cleanedData[boxName]) {
+        backup.data.set(boxName, cleanedData[boxName]);
       }
     });
 
@@ -196,10 +315,14 @@ router.post('/selective', authenticateToken, async (req, res) => {
     backup.updatedAt = new Date();
     await backup.save();
 
-    console.log('✅ Selective sync completed');
+    console.log(`✅ Selective sync completed for profile: ${profileId}`);
     res.status(200).json({
       success: true,
       message: 'Selective sync completed',
+      profileId,
+      syncedBoxes: boxNames,
+      stats: backup.stats,
+      dataSize: backup.getFormattedSize(),
     });
   } catch (error) {
     console.error('❌ Selective sync error:', error);
@@ -216,31 +339,33 @@ router.post('/selective', authenticateToken, async (req, res) => {
 // ============================================
 
 /**
- * GET /api/sync/status
- * Get sync status and metadata
+ * GET /api/sync/status?profileId=xxx
+ * Get sync status and metadata (profile-specific)
  */
-router.get('/status', authenticateToken, async (req, res) => {
+router.get('/status', authenticateToken, verifyProfileAccess, async (req, res) => {
   try {
     const userId = req.user.userId;
+    const profileId = req.profileId;
 
-    const backup = await UserBackup.findOne({ userId });
+    const backup = await UserBackup.findOne({ userId, profileId });
 
     if (!backup) {
       return res.status(200).json({
         success: true,
         hasBackup: false,
+        profileId,
         lastBackupTime: null,
       });
     }
 
-    const stats = calculateBackupStats(backup.data);
-
     res.status(200).json({
       success: true,
       hasBackup: true,
+      profileId: backup.profileId,
       lastBackupTime: backup.lastBackupTime,
       version: backup.version,
-      stats,
+      stats: backup.stats,
+      dataSize: backup.getFormattedSize(),
     });
   } catch (error) {
     console.error('❌ Status error:', error);
@@ -257,19 +382,28 @@ router.get('/status', authenticateToken, async (req, res) => {
 // ============================================
 
 /**
- * DELETE /api/sync/backup
- * Delete user's cloud backup
+ * DELETE /api/sync/backup?profileId=xxx
+ * Delete profile-specific cloud backup
  */
-router.delete('/backup', authenticateToken, async (req, res) => {
+router.delete('/backup', authenticateToken, verifyProfileAccess, async (req, res) => {
   try {
     const userId = req.user.userId;
+    const profileId = req.profileId;
 
-    await UserBackup.findOneAndDelete({ userId });
+    const result = await UserBackup.findOneAndDelete({ userId, profileId });
 
-    console.log('✅ Backup deleted');
+    if (!result) {
+      return res.status(404).json({
+        success: false,
+        message: 'No backup found to delete',
+      });
+    }
+
+    console.log(`✅ Backup deleted for profile: ${profileId}`);
     res.status(200).json({
       success: true,
       message: 'Cloud backup deleted successfully',
+      profileId,
     });
   } catch (error) {
     console.error('❌ Delete error:', error);
@@ -282,56 +416,46 @@ router.delete('/backup', authenticateToken, async (req, res) => {
 });
 
 // ============================================
-// HELPER FUNCTIONS
+// GET ALL PROFILES FOR USER
 // ============================================
 
 /**
- * Calculate statistics from backup data
+ * GET /api/sync/profiles
+ * Get all backed-up profiles for the current user
  */
-function calculateBackupStats(data) {
-  const stats = {
-    totalBoxes: 0,
-    totalItems: 0,
-    boxDetails: {},
-  };
+router.get('/profiles', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.userId;
 
-  for (const [boxName, boxData] of Object.entries(data)) {
-    const itemCount = Object.keys(boxData).length;
-    stats.totalBoxes++;
-    stats.totalItems += itemCount;
-    stats.boxDetails[boxName] = itemCount;
+    const backups = await UserBackup.find({ userId })
+      .populate('profileId', 'name type icon color')
+      .select('profileId lastBackupTime version stats dataSize')
+      .sort({ lastBackupTime: -1 });
+
+    console.log(`📋 Found ${backups.length} profile backups for user: ${userId}`);
+
+    res.status(200).json({
+      success: true,
+      profiles: backups.map(b => ({
+        profileId: b.profileId._id,
+        profileName: b.profileId.name,
+        profileType: b.profileId.type,
+        profileIcon: b.profileId.icon,
+        profileColor: b.profileId.color,
+        lastBackupTime: b.lastBackupTime,
+        version: b.version,
+        stats: b.stats,
+        dataSize: b.getFormattedSize(),
+      })),
+    });
+  } catch (error) {
+    console.error('❌ Error getting profiles:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get profiles',
+      error: error.message,
+    });
   }
-
-  return stats;
-}
-
-/**
- * Merge local and cloud data with conflict resolution
- */
-function mergeData(localData, cloudData, options = {}) {
-  const { preferCloud = false } = options;
-  const merged = {};
-
-  // Get all unique box names
-  const allBoxNames = new Set([
-    ...Object.keys(localData),
-    ...Object.keys(cloudData),
-  ]);
-
-  for (const boxName of allBoxNames) {
-    const local = localData[boxName] || {};
-    const cloud = cloudData[boxName] || {};
-
-    if (preferCloud) {
-      // Cloud data takes precedence
-      merged[boxName] = { ...local, ...cloud };
-    } else {
-      // Local data takes precedence
-      merged[boxName] = { ...cloud, ...local };
-    }
-  }
-
-  return merged;
-}
+});
 
 module.exports = router;

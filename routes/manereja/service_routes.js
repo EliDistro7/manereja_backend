@@ -13,7 +13,7 @@ const {
 const { rateLimiter } = require('../../middleware/services/rate_limiter');
 const ServiceUtils = require('../../utils/serviceUtils');
 
-console.log('user controller:', UserController);
+// console.log('user controller:', UserController);
 
 
 

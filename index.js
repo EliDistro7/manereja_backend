@@ -12,10 +12,20 @@ dotenv.config();
 
 const userRoutes = require('./routes/manereja/auth_routes.js');
 const serviceRoutes = require('./routes/manereja/service_routes.js');
-const eventRoutes = require('./routes/event-routes');
-const mediaRoutes = require('./routes/media-routes');
+
+
 const notificationsRoutes = require("./routes/notifications-routes.js");
 const syncRoutes = require("./routes/manereja/sync-routes.js");
+const profileRoutes = require("./routes/manereja/profile-routes");
+const salesItemRoutes= require('./routes/manereja/salesItem-routes.js');
+const TanzaniaSeed = require('./seeds/locations/Tanzania.js');
+const PackagesSeed = require('./models/manereja/seed_package.js');
+const locationRoutes = require('./routes/manereja/location-routes.js');
+const attendanceRoutes = require('./routes/manereja/attendance-routes.js');
+const projectRoutes = require('./routes/manereja/project-routes.js');
+const taskRoutes = require('./routes/manereja/task-routes.js');
+const packageRoutes = require('./routes/manereja/package-routes.js');
+const systemNotificationRoutes = require('./routes/manereja/systemNotificationRoutes.js');
 
 const PORT = process.env.PORT || 5000;
 
@@ -73,7 +83,7 @@ app.get('/health', (req, res) => {
 });
 
 // MongoDB Connection
-mongoose.connect(process.env.MONGO_URL, {
+mongoose.connect(process.env.local_mongodb, {
     useNewUrlParser: true,
     useUnifiedTopology: true,
     connectTimeoutMS: 20000,
@@ -81,6 +91,9 @@ mongoose.connect(process.env.MONGO_URL, {
 })
 .then(() => {
     console.log("Connected to MongoDB");
+   //
+   // TanzaniaSeed.seedTanzaniaLocations();
+   //    PackagesSeed.seedPackages();
 })
 .catch((err) => {
     console.log("NOT CONNECTED TO NETWORK", err);
@@ -90,11 +103,20 @@ mongoose.connect(process.env.MONGO_URL, {
 const io = initSocket(server);
 
 // Routes
+app.use('/locations', locationRoutes);
 app.use('/', userRoutes);
 app.use('/', serviceRoutes);
-app.use('/api/media', mediaRoutes);
+
 app.use('/', notificationsRoutes);
 app.use('/sync', syncRoutes);
+app.use('/profiles', profileRoutes);
+app.use('/api/sales-items', salesItemRoutes);
+app.use('/api/attendance', attendanceRoutes);
+app.use('/api/projects', projectRoutes);
+app.use('/api/tasks', taskRoutes);
+app.use('/', packageRoutes);
+app.use('/api/system-notifications', systemNotificationRoutes);
+
 
 // Start the server - IMPORTANT: bind to all interfaces
 server.listen(PORT, '0.0.0.0', () => {
