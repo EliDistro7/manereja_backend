@@ -391,6 +391,13 @@ taskSchema.methods.updateProjectProgress = async function() {
   }
 };
 
+/**
+ * Check if a user is an assignee of this task
+ */
+taskSchema.methods.isAssignee = function(userId) {
+  return this.assignedTo.some(id => id.toString() === userId.toString());
+};
+
 // Helper function
 function calculateDistance(lat1, lon1, lat2, lon2) {
   const R = 6371;
