@@ -34,9 +34,10 @@ const allowedOrigins = [
     'http://localhost:60194',
     'http://192.168.0.72:5000',
     'http://192.168.0.72:3000',
-    'http://192.168.0.185:5000',
+    'http://192.168.43.163:5000',
      'http://192.168.0.185:3000',
     'http://localhost:5000',
+    
     'exp://localhost:19000',
 
      // Try these alternatives:
@@ -93,7 +94,7 @@ mongoose.connect(process.env.MONGO_URL, {
     console.log("Connected to MongoDB");
    //
    // TanzaniaSeed.seedTanzaniaLocations();
-   //    PackagesSeed.seedPackages();
+   
 })
 .catch((err) => {
     console.log("NOT CONNECTED TO NETWORK", err);
@@ -103,6 +104,7 @@ mongoose.connect(process.env.MONGO_URL, {
 const io = initSocket(server);
 
 // Routes
+app.use('/', packageRoutes);
 app.use('/locations', locationRoutes);
 app.use('/', userRoutes);
 app.use('/', serviceRoutes);
@@ -114,7 +116,7 @@ app.use('/api/sales-items', salesItemRoutes);
 app.use('/api/attendance', attendanceRoutes);
 app.use('/api/projects', projectRoutes);
 app.use('/api/tasks', taskRoutes);
-app.use('/', packageRoutes);
+
 app.use('/api/system-notifications', systemNotificationRoutes);
 
 

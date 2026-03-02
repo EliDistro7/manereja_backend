@@ -287,7 +287,7 @@ PackageSchema.methods.getAnnualPrice = function() {
 // ✅ UserPackageSubscription Methods
 UserPackageSubscriptionSchema.methods.isActive = function() {
   const now = new Date();
-  return this.status === 'active' && this.expiryDate > now;
+  return (this.status === 'active' || this.status === 'trial') && this.expiryDate > now;
 };
 
 UserPackageSubscriptionSchema.methods.isExpired = function() {
@@ -359,7 +359,7 @@ UserPackageSubscriptionSchema.methods.recordLogin = async function() {
 UserPackageSubscriptionSchema.statics.getActivePackages = async function(userId) {
   return this.find({
     userId,
-    status: 'active',
+    status: { $in: ['active', 'trial'] },
     expiryDate: { $gt: new Date() }
   }).populate('packageId');
 };
@@ -368,7 +368,7 @@ UserPackageSubscriptionSchema.statics.getActivePackages = async function(userId)
 UserPackageSubscriptionSchema.statics.hasPackage = async function(userId, packageType) {
   const subscription = await this.findOne({
     userId,
-    status: 'active',
+    status: { $in: ['active', 'trial'] },
     expiryDate: { $gt: new Date() }
   }).populate('packageId');
   
@@ -417,8 +417,8 @@ UserPackageSubscriptionSchema.statics.calculateAgentCommissions = async function
 UserPackageSubscriptionSchema.pre('save', function(next) {
   const now = new Date();
   
-  // Auto-expire if past expiry date
-  if (this.expiryDate <= now && this.status === 'active') {
+  // Auto-expire if past expiry date (skip on initial creation)
+  if (!this.isNew && (this.status === 'active' || this.status === 'trial') && this.expiryDate <= now) {
     this.status = 'expired';
   }
   

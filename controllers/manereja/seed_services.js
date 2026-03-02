@@ -1,457 +1,268 @@
+// scripts/seedPackages.js
+// Run: node scripts/seedPackages.js
+// Requires: MONGO_URL in .env
+//   MONGO_URL=mongodb+srv://... node scripts/seedPackages.js
+
+'use strict';
+
 const mongoose = require('mongoose');
-const Service = require('../../models/manereja/service.js'); // Adjust path as neede
+require('dotenv').config();
 
+// ── Inline schemas (avoids import path issues when run standalone) ─────────────
 
-// Manereja services based on your Flutter app
-const manejeraServices = [
+const PackageFeatureSchema = new mongoose.Schema({
+  featureId:          { type: String, required: true },
+  name:               { type: String, required: true },
+  nameSwahili:        { type: String },
+  description:        { type: String },
+  descriptionSwahili: { type: String },
+  isIncluded:         { type: Boolean, default: true },
+  usageLimit:         { type: Number, default: null },
+}, { _id: false });
+
+const PackagePriceSchema = new mongoose.Schema({
+  amount:       { type: Number, required: true },
+  currency:     { type: String, default: 'TZS' },
+  billingCycle: { type: String, enum: ['monthly', 'quarterly', 'yearly'], default: 'monthly' },
+}, { _id: false });
+
+const PackageSchema = new mongoose.Schema(
   {
-    name: 'Income Tracking',
-    slug: 'mapato',
-    description: 'Track your revenue and earnings with comprehensive income management tools',
-    icon: 'trending_up_rounded',
-    category: 'finance',
-    subscriptionTier: 'free',
-    usageLimit: {
-      free: 100,
-      premium: null
+    name:               { type: String, required: true, trim: true },
+    displayName:        { type: String, required: true, trim: true },
+    displayNameSwahili: { type: String, required: true, trim: true },
+    packageType: {
+      type: String,
+      enum: ['accounting', 'taskManagement', 'bundle'],
+      required: true,
     },
-    isActive: true,
-    config: {
-      requiresAuth: true,
-      requiresSubscription: false,
-      allowBulkOperations: true,
-      maxFileSize: 5 * 1024 * 1024,
-      supportedFileTypes: ['csv', 'xlsx', 'json'],
-      apiEndpoint: '/api/mapato'
-    },
-    pricing: {
-      freeUsage: 100,
-      premiumPrice: 0,
-      currency: 'TZS'
-    },
-    features: {
-      hasAI: true,
-      hasAnalytics: true,
-      hasExport: true,
-      hasNotifications: true,
-      hasIntegrations: false
-    },
+    description:        { type: String, trim: true },
+    descriptionSwahili: { type: String, trim: true },
+    tagline:            { type: String, trim: true },
+    taglineSwahili:     { type: String, trim: true },
+    price:              { type: PackagePriceSchema, required: true },
+    features:           [PackageFeatureSchema],
+    trialDays:          { type: Number, default: 7 },
+    isActive:           { type: Boolean, default: true },
+    priority:           { type: Number, default: 0 },
     metadata: {
-      developer: 'Manereja Team',
-      supportEmail: 'support@manereja.com',
-      tags: ['income', 'revenue', 'earnings', 'finance'],
-      averageRating: 4.5,
-      totalRatings: 120
-    }
+      color:       { type: String, default: '#84CC16' },
+      icon:        { type: String, default: 'package' },
+      isPopular:   { type: Boolean, default: false },
+      isFeatured:  { type: Boolean, default: false },
+    },
   },
+  { timestamps: true }
+);
+
+const Package = mongoose.model('Package', PackageSchema);
+
+// ── Package definitions ───────────────────────────────────────────────────────
+//
+// Names are intentionally identical in EN and SW — do not change.
+
+const packages = [
+  // ── 1. Finance Manager ────────────────────────────────────────────────────
   {
-    name: 'Expense Management',
-    slug: 'matumizi',
-    description: 'Monitor your spending patterns and manage expenses efficiently',
-    icon: 'receipt_long_rounded',
-    category: 'finance',
-    subscriptionTier: 'free',
-    usageLimit: {
-      free: 150,
-      premium: null
+    name:               'accounting',
+    displayName:        'Finance Manager',
+    displayNameSwahili: 'Finance Manager',   // ← same in both languages
+    packageType:        'accounting',
+    description:        'Complete financial control for your business — income, expenses, cash flow, budgets, savings, debts, and professional reports.',
+    descriptionSwahili: 'Udhibiti kamili wa fedha za biashara yako — mapato, matumizi, mzunguko wa fedha, bajeti, akiba, madeni, na ripoti za kitaalamu.',
+    tagline:            'Full accounting suite',
+    taglineSwahili:     'Mfumo kamili wa uhasibu',
+    price: {
+      amount:       15000,
+      currency:     'TZS',
+      billingCycle: 'monthly',
     },
-    isActive: true,
-    config: {
-      requiresAuth: true,
-      requiresSubscription: false,
-      allowBulkOperations: true,
-      maxFileSize: 5 * 1024 * 1024,
-      supportedFileTypes: ['csv', 'xlsx', 'json'],
-      apiEndpoint: '/api/matumizi'
-    },
-    pricing: {
-      freeUsage: 150,
-      premiumPrice: 0,
-      currency: 'TZS'
-    },
-    features: {
-      hasAI: true,
-      hasAnalytics: true,
-      hasExport: true,
-      hasNotifications: true,
-      hasIntegrations: false
-    },
+    features: [
+      { featureId: 'mapato',     name: 'Income Tracking',    nameSwahili: 'Ufuatiliaji wa Mapato',    isIncluded: true },
+      { featureId: 'matumizi',   name: 'Expense Management', nameSwahili: 'Usimamizi wa Matumizi',    isIncluded: true },
+      { featureId: 'cash_flow',  name: 'Cash Flow',          nameSwahili: 'Mzunguko wa Fedha',        isIncluded: true },
+      { featureId: 'bajeti',     name: 'Budget Management',  nameSwahili: 'Usimamizi wa Bajeti',      isIncluded: true },
+      { featureId: 'akiba',      name: 'Savings',            nameSwahili: 'Akiba',                    isIncluded: true },
+      { featureId: 'mikopo',     name: 'Debts Owed',         nameSwahili: 'Mikopo',                   isIncluded: true },
+      { featureId: 'madeni',     name: 'Money Owed',         nameSwahili: 'Madeni',                   isIncluded: true },
+      { featureId: 'malengo',    name: 'Financial Goals',    nameSwahili: 'Malengo ya Fedha',         isIncluded: true },
+      { featureId: 'ripoti',     name: 'Analytics & Reports',nameSwahili: 'Uchambuzi na Ripoti',      isIncluded: true },
+      { featureId: 'banks',      name: 'Banking Options',    nameSwahili: 'Chaguzi za Benki',         isIncluded: true },
+    ],
+    trialDays: 7,
+    isActive:  true,
+    priority:  1,
     metadata: {
-      developer: 'Manereja Team',
-      supportEmail: 'support@manereja.com',
-      tags: ['expense', 'spending', 'management', 'finance'],
-      averageRating: 4.3,
-      totalRatings: 95
-    }
+      color:      '#84CC16',   // limeGreen
+      icon:       'account_balance_wallet_rounded',
+      isPopular:  false,
+      isFeatured: false,
+    },
   },
+
+  // ── 2. Tasks Manager ─────────────────────────────────────────────────────
   {
-    name: 'Cash Flow',
-    slug: 'cash_flow',
-    description: 'Visualize money movement and track cash flow patterns',
-    icon: 'waterfall_chart_rounded',
-    category: 'analytics',
-    subscriptionTier: 'both',
-    usageLimit: {
-      free: 30,
-      premium: null
+    name:               'task_management',
+    displayName:        'Tasks Manager',
+    displayNameSwahili: 'Tasks Manager',     // ← same in both languages
+    packageType:        'taskManagement',
+    description:        'End-to-end operations management — inventory, orders, attendance, projects, tasks, and supplier tracking.',
+    descriptionSwahili: 'Usimamizi kamili wa uendeshaji — stoo, oda, mahudhurio, miradi, kazi, na ufuatiliaji wa wasambazaji.',
+    tagline:            'Operations & project management',
+    taglineSwahili:     'Uendeshaji na usimamizi wa miradi',
+    price: {
+      amount:       12000,
+      currency:     'TZS',
+      billingCycle: 'monthly',
     },
-    isActive: true,
-    config: {
-      requiresAuth: true,
-      requiresSubscription: false,
-      allowBulkOperations: false,
-      maxFileSize: 10 * 1024 * 1024,
-      supportedFileTypes: ['csv', 'xlsx', 'pdf'],
-      apiEndpoint: '/api/cash-flow'
-    },
-    pricing: {
-      freeUsage: 30,
-      premiumPrice: 0,
-      currency: 'TZS'
-    },
-    features: {
-      hasAI: true,
-      hasAnalytics: true,
-      hasExport: true,
-      hasNotifications: true,
-      hasIntegrations: true
-    },
+    features: [
+      { featureId: 'stock',         name: 'Inventory',           nameSwahili: 'Stoo',                     isIncluded: true },
+      { featureId: 'oda',           name: 'Orders',              nameSwahili: 'Oda',                      isIncluded: true },
+      { featureId: 'mahudhurio',    name: 'Attendance',          nameSwahili: 'Mahudhurio',               isIncluded: true },
+      { featureId: 'miradi',        name: 'Tasks & Projects',    nameSwahili: 'Kazi na Miradi',           isIncluded: true },
+      { featureId: 'shared_accounts', name: 'Shared Accounts',  nameSwahili: 'Akaunti Zinazoshirikiwa',  isIncluded: true },
+    ],
+    trialDays: 7,
+    isActive:  true,
+    priority:  2,
     metadata: {
-      developer: 'Manereja Team',
-      supportEmail: 'support@manereja.com',
-      tags: ['cash flow', 'visualization', 'analytics', 'finance'],
-      averageRating: 4.7,
-      totalRatings: 78
-    }
+      color:      '#8B5CF6',   // purple
+      icon:       'task_alt_rounded',
+      isPopular:  true,
+      isFeatured: false,
+    },
   },
+
+  // ── 3. Full Suite ─────────────────────────────────────────────────────────
   {
-    name: 'Analytics',
-    slug: 'ripoti',
-    description: 'Detailed reports and insights for better financial decisions',
-    icon: 'analytics_rounded',
-    category: 'analytics',
-    subscriptionTier: 'both',
-    usageLimit: {
-      free: 20,
-      premium: null
+    name:               'bundle',
+    displayName:        'Full Suite',
+    displayNameSwahili: 'Full Suite',        // ← same in both languages
+    packageType:        'bundle',
+    description:        'Everything in Finance Manager and Tasks Manager — the complete Manereja experience at the best price.',
+    descriptionSwahili: 'Kila kitu katika Finance Manager na Tasks Manager — uzoefu kamili wa Manereja kwa bei nzuri zaidi.',
+    tagline:            'Best value — all features included',
+    taglineSwahili:     'Thamani bora — vipengele vyote vimejumuishwa',
+    price: {
+      amount:       22000,
+      currency:     'TZS',
+      billingCycle: 'monthly',
     },
-    isActive: true,
-    config: {
-      requiresAuth: true,
-      requiresSubscription: false,
-      allowBulkOperations: true,
-      maxFileSize: 15 * 1024 * 1024,
-      supportedFileTypes: ['csv', 'xlsx', 'pdf', 'json'],
-      apiEndpoint: '/api/ripoti'
-    },
-    pricing: {
-      freeUsage: 20,
-      premiumPrice: 0,
-      currency: 'TZS'
-    },
-    features: {
-      hasAI: true,
-      hasAnalytics: true,
-      hasExport: true,
-      hasNotifications: true,
-      hasIntegrations: true
-    },
+    features: [
+      // Finance Manager features
+      { featureId: 'mapato',          name: 'Income Tracking',       nameSwahili: 'Ufuatiliaji wa Mapato',   isIncluded: true },
+      { featureId: 'matumizi',        name: 'Expense Management',    nameSwahili: 'Usimamizi wa Matumizi',   isIncluded: true },
+      { featureId: 'cash_flow',       name: 'Cash Flow',             nameSwahili: 'Mzunguko wa Fedha',       isIncluded: true },
+      { featureId: 'bajeti',          name: 'Budget Management',     nameSwahili: 'Usimamizi wa Bajeti',     isIncluded: true },
+      { featureId: 'akiba',           name: 'Savings',               nameSwahili: 'Akiba',                   isIncluded: true },
+      { featureId: 'mikopo',          name: 'Debts Owed',            nameSwahili: 'Mikopo',                  isIncluded: true },
+      { featureId: 'madeni',          name: 'Money Owed',            nameSwahili: 'Madeni',                  isIncluded: true },
+      { featureId: 'malengo',         name: 'Financial Goals',       nameSwahili: 'Malengo ya Fedha',        isIncluded: true },
+      { featureId: 'ripoti',          name: 'Analytics & Reports',   nameSwahili: 'Uchambuzi na Ripoti',     isIncluded: true },
+      { featureId: 'banks',           name: 'Banking Options',       nameSwahili: 'Chaguzi za Benki',        isIncluded: true },
+      // Tasks Manager features
+      { featureId: 'stock',           name: 'Inventory',             nameSwahili: 'Stoo',                    isIncluded: true },
+      { featureId: 'oda',             name: 'Orders',                nameSwahili: 'Oda',                     isIncluded: true },
+      { featureId: 'mahudhurio',      name: 'Attendance',            nameSwahili: 'Mahudhurio',              isIncluded: true },
+      { featureId: 'miradi',          name: 'Tasks & Projects',      nameSwahili: 'Kazi na Miradi',          isIncluded: true },
+      { featureId: 'shared_accounts', name: 'Shared Accounts',       nameSwahili: 'Akaunti Zinazoshirikiwa', isIncluded: true },
+    ],
+    trialDays: 7,
+    isActive:  true,
+    priority:  3,
     metadata: {
-      developer: 'Manereja Team',
-      supportEmail: 'support@manereja.com',
-      tags: ['analytics', 'reports', 'insights', 'finance'],
-      averageRating: 4.8,
-      totalRatings: 156
-    }
+      color:      '#F59E0B',   // amber
+      icon:       'auto_awesome_rounded',
+      isPopular:  false,
+      isFeatured: true,
+    },
   },
-  {
-    name: 'Inventory',
-    slug: 'stock',
-    description: 'Manage your stock levels and inventory tracking',
-    icon: 'inventory_2_rounded',
-    category: 'business',
-    subscriptionTier: 'both',
-    usageLimit: {
-      free: 50,
-      premium: null
-    },
-    isActive: true,
-    config: {
-      requiresAuth: true,
-      requiresSubscription: false,
-      allowBulkOperations: true,
-      maxFileSize: 10 * 1024 * 1024,
-      supportedFileTypes: ['csv', 'xlsx', 'json'],
-      apiEndpoint: '/api/stock'
-    },
-    pricing: {
-      freeUsage: 50,
-      premiumPrice: 0,
-      currency: 'TZS'
-    },
-    features: {
-      hasAI: false,
-      hasAnalytics: true,
-      hasExport: true,
-      hasNotifications: true,
-      hasIntegrations: true
-    },
-    metadata: {
-      developer: 'Manereja Team',
-      supportEmail: 'support@manereja.com',
-      tags: ['inventory', 'stock', 'management', 'business'],
-      averageRating: 4.2,
-      totalRatings: 67
-    }
-  },
-  {
-    name: 'Financial Goals',
-    slug: 'malengo',
-    description: 'Set and track your financial targets and goals',
-    icon: 'flag_rounded',
-    category: 'finance',
-    subscriptionTier: 'free',
-    usageLimit: {
-      free: 25,
-      premium: null
-    },
-    isActive: true,
-    config: {
-      requiresAuth: true,
-      requiresSubscription: false,
-      allowBulkOperations: false,
-      maxFileSize: 5 * 1024 * 1024,
-      supportedFileTypes: ['json'],
-      apiEndpoint: '/api/malengo'
-    },
-    pricing: {
-      freeUsage: 25,
-      premiumPrice: 0,
-      currency: 'TZS'
-    },
-    features: {
-      hasAI: true,
-      hasAnalytics: true,
-      hasExport: false,
-      hasNotifications: true,
-      hasIntegrations: false
-    },
-    metadata: {
-      developer: 'Manereja Team',
-      supportEmail: 'support@manereja.com',
-      tags: ['goals', 'targets', 'planning', 'finance'],
-      averageRating: 4.4,
-      totalRatings: 89
-    }
-  },
-  {
-    name: 'Debts Owed',
-    slug: 'mikopo',
-    description: 'Track money you owe and manage debt payments',
-    icon: 'credit_card_rounded',
-    category: 'finance',
-    subscriptionTier: 'free',
-    usageLimit: {
-      free: 40,
-      premium: null
-    },
-    isActive: true,
-    config: {
-      requiresAuth: true,
-      requiresSubscription: false,
-      allowBulkOperations: true,
-      maxFileSize: 5 * 1024 * 1024,
-      supportedFileTypes: ['csv', 'xlsx', 'json'],
-      apiEndpoint: '/api/mikopo'
-    },
-    pricing: {
-      freeUsage: 40,
-      premiumPrice: 0,
-      currency: 'TZS'
-    },
-    features: {
-      hasAI: false,
-      hasAnalytics: true,
-      hasExport: true,
-      hasNotifications: true,
-      hasIntegrations: false
-    },
-    metadata: {
-      developer: 'Manereja Team',
-      supportEmail: 'support@manereja.com',
-      tags: ['debt', 'loans', 'payments', 'finance'],
-      averageRating: 4.1,
-      totalRatings: 54
-    }
-  },
-  {
-    name: 'Money Owed',
-    slug: 'madeni',
-    description: 'Track money owed to you and manage receivables',
-    icon: 'account_balance_rounded',
-    category: 'finance',
-    subscriptionTier: 'free',
-    usageLimit: {
-      free: 40,
-      premium: null
-    },
-    isActive: true,
-    config: {
-      requiresAuth: true,
-      requiresSubscription: false,
-      allowBulkOperations: true,
-      maxFileSize: 5 * 1024 * 1024,
-      supportedFileTypes: ['csv', 'xlsx', 'json'],
-      apiEndpoint: '/api/madeni'
-    },
-    pricing: {
-      freeUsage: 40,
-      premiumPrice: 0,
-      currency: 'TZS'
-    },
-    features: {
-      hasAI: false,
-      hasAnalytics: true,
-      hasExport: true,
-      hasNotifications: true,
-      hasIntegrations: false
-    },
-    metadata: {
-      developer: 'Manereja Team',
-      supportEmail: 'support@manereja.com',
-      tags: ['receivables', 'money owed', 'tracking', 'finance'],
-      averageRating: 4.0,
-      totalRatings: 43
-    }
-  },
-  {
-    name: 'Shared Accounts',
-    slug: 'shared_accounts',
-    description: 'Collaborative financial management with shared accounts',
-    icon: 'group_rounded',
-    category: 'business',
-    subscriptionTier: 'premium',
-    usageLimit: {
-      free: 0,
-      premium: null
-    },
-    isActive: true,
-    config: {
-      requiresAuth: true,
-      requiresSubscription: true,
-      allowBulkOperations: true,
-      maxFileSize: 10 * 1024 * 1024,
-      supportedFileTypes: ['csv', 'xlsx', 'json'],
-      apiEndpoint: '/api/shared-accounts'
-    },
-    pricing: {
-      freeUsage: 0,
-      premiumPrice: 0,
-      currency: 'TZS'
-    },
-    features: {
-      hasAI: false,
-      hasAnalytics: true,
-      hasExport: true,
-      hasNotifications: true,
-      hasIntegrations: true
-    },
-    metadata: {
-      developer: 'Manereja Team',
-      supportEmail: 'support@manereja.com',
-      tags: ['shared', 'collaboration', 'accounts', 'business'],
-      averageRating: 4.6,
-      totalRatings: 72
-    }
-  },
-  {
-    name: 'Banking Options',
-    slug: 'banks',
-    description: 'Explore loan and financing options from various banks',
-    icon: 'account_balance_rounded',
-    category: 'finance',
-    subscriptionTier: 'both',
-    usageLimit: {
-      free: 10,
-      premium: null
-    },
-    isActive: true,
-    config: {
-      requiresAuth: true,
-      requiresSubscription: false,
-      allowBulkOperations: false,
-      maxFileSize: 5 * 1024 * 1024,
-      supportedFileTypes: ['pdf', 'json'],
-      apiEndpoint: '/api/banks'
-    },
-    pricing: {
-      freeUsage: 10,
-      premiumPrice: 0,
-      currency: 'TZS'
-    },
-    features: {
-      hasAI: true,
-      hasAnalytics: false,
-      hasExport: false,
-      hasNotifications: true,
-      hasIntegrations: true
-    },
-    metadata: {
-      developer: 'Manereja Team',
-      supportEmail: 'support@manereja.com',
-      tags: ['banking', 'loans', 'financing', 'finance'],
-      averageRating: 4.3,
-      totalRatings: 91
-    }
-  }
 ];
 
-// Function to seed the database
-async function seedServices() {
-  try {
+// ── Seeder ────────────────────────────────────────────────────────────────────
 
-    const dotenv = require('dotenv');
-    dotenv.config();
-  
-   mongoose.connect('mongodb://127.0.0.1:27017/?directConnection=true&serverSelectionTimeoutMS=2000&appName=mongosh+2.2.12', {
-       useNewUrlParser: true,
-       useUnifiedTopology: true,
-       connectTimeoutMS: 20000,
-       socketTimeoutMS: 45000,
-   })
-   .then(() => {
-       console.log("Connected to MongoDB");
-   })
-   .catch((err) => {
-       console.log("NOT CONNECTED TO NETWORK", err);
-   });
+async function seed() {
+  const uri = process.env.MONGO_URL || process.env.MONGO_URI;
 
- 
-
-    // Clear existing services (optional)
-    // Service.deleteMany({});
-    console.log('Cleared existing services');
-
-    // Insert new services
-    const createdServices = await Service.insertMany(manejeraServices);
-    console.log(`Successfully created ${createdServices.length} services:`);
-    
-    createdServices.forEach(service => {
-      console.log(`- ${service.name} (${service.slug})`);
-    });
-
-    // Close connection
-    await mongoose.connection.close();
-    console.log('Database connection closed');
-
-  } catch (error) {
-    console.error('Error seeding services:', error);
+  if (!uri) {
+    console.error(
+      '❌  No MongoDB URI found.\n' +
+      '    Set MONGO_URL in your .env file or pass it as an env var:\n' +
+      '    MONGO_URL=mongodb+srv://... node scripts/seedPackages.js'
+    );
     process.exit(1);
   }
+
+  // ── 1. Connect ─────────────────────────────────────────────────────────────
+  console.log('🔌 Connecting to MongoDB...');
+  await mongoose.connect(uri, { serverSelectionTimeoutMS: 15_000 });
+  console.log('✅ Connected\n');
+
+// ── 2. Delete ALL existing packages first ──────────────────────────────────
+  console.log('🗑️  Deleting all existing packages...');
+  const deleted = await Package.deleteMany({});
+  console.log(`   Removed ${deleted.deletedCount} package(s)\n`);
+
+  // ── 2b. Drop ALL indexes except _id to avoid stale unique constraint errors ─
+  console.log('🔧 Dropping stale indexes...');
+  try {
+    await Package.collection.dropIndexes();
+    console.log('   All non-_id indexes dropped\n');
+  } catch (err) {
+    console.log(`   No indexes to drop (${err.message})\n`);
+  }
+
+  // ── 2c. Verify deletion worked ─────────────────────────────────────────────
+  const remainingCount = await Package.countDocuments({});
+  if (remainingCount > 0) {
+    console.error(`❌ WARNING: ${remainingCount} packages still exist after deletion!`);
+    console.log('   Attempting force cleanup...\n');
+    try {
+      await Package.collection.drop();
+      console.log('   ✅ Collection dropped successfully\n');
+    } catch (dropErr) {
+      console.error(`   ❌ Could not drop collection: ${dropErr.message}\n`);
+    }
+  }
+
+  // ── 3. Insert fresh packages ───────────────────────────────────────────────
+  console.log(`📦 Inserting ${packages.length} packages...\n`);
+
+  const results = { inserted: 0, errors: [] };
+
+  for (const data of packages) {
+    try {
+      await Package.create(data);
+      console.log(`  ✅ INSERTED  ${data.displayName} (${data.packageType}) — TZS ${data.price.amount.toLocaleString()}/mo`);
+      results.inserted++;
+    } catch (err) {
+      console.error(`  ❌ ERROR     ${data.displayName}: ${err.message}`);
+      results.errors.push({ name: data.displayName, error: err.message });
+    }
+  }
+
+  // ── 4. Summary ─────────────────────────────────────────────────────────────
+  console.log('\n══════════════════════════════════════');
+  console.log(`  Inserted : ${results.inserted}`);
+  console.log(`  Errors   : ${results.errors.length}`);
+  if (results.errors.length > 0) {
+    results.errors.forEach(e => console.log(`    • ${e.name}: ${e.error}`));
+  }
+  console.log('══════════════════════════════════════\n');
+
+  // ── 5. Verify ──────────────────────────────────────────────────────────────
+  const all = await Package.find({}, 'displayName packageType price.amount features priority').sort({ priority: 1 });
+  console.log('📋 Packages in DB:');
+  all.forEach(p => {
+    console.log(`   [${p.priority}] ${p.displayName.padEnd(16)} type=${p.packageType.padEnd(14)} price=TZS ${p.price.amount.toLocaleString().padStart(6)}/mo  features=${p.features.length}`);
+  });
+
+  // ── 6. Disconnect ──────────────────────────────────────────────────────────
+  await mongoose.disconnect();
+  console.log('\n🔌 Disconnected. Done.');
 }
 
-// Run the seeder
-seedServices();
-
-// Export for use in other files
-//module.exports = { manejeraServices, seedServices };
+seed().catch(err => {
+  console.error('💥 Unexpected error:', err);
+  mongoose.disconnect().finally(() => process.exit(1));
+});

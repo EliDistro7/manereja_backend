@@ -111,10 +111,11 @@ router.get('/users/:userId/has-package/:packageType', async (req, res) => {
 router.post('/users/:userId/subscribe', async (req, res) => {
   try {
     const { packageId, agentId, agentName, isTrial = false } = req.body;
-    
+    console.log('it call user subscrition api', { packageId, agentId, agentName, isTrial  } );
     // Verify user exists
     const user = await User.findById(req.params.userId);
     if (!user) {
+      console.log('user not found');
       return res.status(404).json({
         success: false,
         message: 'User not found'
@@ -124,6 +125,7 @@ router.post('/users/:userId/subscribe', async (req, res) => {
     // Verify package exists
     const package = await Package.findById(packageId);
     if (!package) {
+      console.loG('package does not exust');
       return res.status(404).json({
         success: false,
         message: 'Package not found'
@@ -139,6 +141,7 @@ router.post('/users/:userId/subscribe', async (req, res) => {
     });
     
     if (existingSubscription) {
+      console.log('user has already subcribed');
       return res.status(400).json({
         success: false,
         message: 'User already has an active subscription to this package'
