@@ -23,7 +23,7 @@ async function evaluateUserSubscriptions(userId, io, userSockets) {
 
     for (const sub of subscriptions) {
       const remaining = sub.getRemainingDays();
-      const isTrial   = sub.isTrial || sub.status === 'trial';
+      const isTrial   = sub.isTrial || sub.status === 'trial'
 
       const checks = isTrial
         ? _getTrialChecks(remaining)
