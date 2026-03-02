@@ -58,7 +58,7 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
       const templates = await ReportTemplate.find({ projectId, isDeleted: false })
         .sort({ createdAt: -1 });
 
-      console.log('we got report templates', templates);
+     // console.log('we got report templates', templates);
       socket.emit('report_templates_list', {
         projectId,
         templates: templates.map(t => formatReportTemplate(t)),
@@ -74,6 +74,10 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
   // ==========================================
   socket.on('get_report_templates_by_profile', async ({ businessProfileId, userId }) => {
     try {
+       if (!businessProfileId || businessProfileId.toString().trim() === '') {
+      socket.emit('tasker_error', { error: 'businessProfileId is required' });
+      return;
+    }
       const templates = await ReportTemplate.find({ businessProfileId, isDeleted: false })
         .sort({ createdAt: -1 });
 
