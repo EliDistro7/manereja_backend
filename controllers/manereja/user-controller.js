@@ -52,11 +52,9 @@ class UserController {
 switchActiveProfile = async (req, res) => {
   try {
     const { activeProfileId } = req.body;
-    console.log('🔄 Switching active profile - Request body:', req.body);
     
     // ✅ userId comes from req.user (set by auth middleware from JWT token)
     const userId = req.user.userId;
-    console.log('👤 User ID from token:', userId);
 
     if (!activeProfileId) {
       return this.errorResponse(res, 'Profile ID is required', 400);
@@ -65,12 +63,8 @@ switchActiveProfile = async (req, res) => {
     // Find user
     const user = await User.findById(userId);
     if (!user) {
-      console.log('❌ User not found:', userId);
       return this.errorResponse(res, 'User not found', 404);
     }
-
-    console.log('👤 User found:', user.email);
-    console.log('📋 User business profiles:', user.businessProfileIds);
 
     // Verify user has access to this profile
     const hasAccess = user.businessProfileIds.some(
@@ -78,7 +72,6 @@ switchActiveProfile = async (req, res) => {
     );
 
     if (!hasAccess) {
-      console.log('❌ Access denied to profile:', activeProfileId);
       return this.errorResponse(res, 'Access denied to this profile', 403);
     }
 
@@ -87,18 +80,14 @@ switchActiveProfile = async (req, res) => {
     const profile = await BusinessProfile.findById(activeProfileId);
     
     if (!profile) {
-      console.log('❌ Profile not found:', activeProfileId);
       return this.errorResponse(res, 'Profile not found', 404);
     }
-
-    console.log('📋 Profile found:', profile.name);
 
     // Verify user actually has access to this profile (owner or member)
     const isOwner = profile.ownerId.toString() === userId;
     const isMember = profile.members && profile.members.has(userId);
 
     if (!isOwner && !isMember) {
-      console.log('❌ User is not owner or member of profile');
       return this.errorResponse(res, 'Access denied to this profile', 403);
     }
 
@@ -110,8 +99,6 @@ switchActiveProfile = async (req, res) => {
     await profile.save();
     
     await user.save();
-
-    console.log(`✅ User ${userId} switched to profile ${activeProfileId}`);
 
     return this.successResponse(res, 'Active profile switched successfully', {
       user: user.toJSON(),
@@ -176,7 +163,6 @@ switchActiveProfile = async (req, res) => {
         await UserService.insertMany(userServices);
       }
 
-      console.log(`Successfully initialized settings and services for user: ${userId}`);
       return { settings: defaultSettings, services: userServices };
     } catch (error) {
       console.error('Error initializing user settings and services:', error);
@@ -187,11 +173,9 @@ switchActiveProfile = async (req, res) => {
   // Sign up with email and password
   signUp = async (req, res) => {
     try {
-      console.log('Sign up request received:', req.body);
       // Validate request
       const errors = validationResult(req);
       if (!errors.isEmpty()) {
-        console.log('Validation errors:', errors);
         return this.errorResponse(res, 'Validation failed', 400, {
           errors: errors.array()
         });
@@ -200,14 +184,6 @@ switchActiveProfile = async (req, res) => {
       const { email, password, name, phoneNumber } = req.body;
 
       // Check if user already exists
-    /*  const existingUser = await User.findOne({
-        $or: [
-          { email: email?.toLowerCase() },
-          { phoneNumber }
-        ]
-      });
-      */
-
       const existingUser = await User.findOne({ email });
       const existingUser2 = await User.findOne({ phoneNumber });
 
@@ -217,7 +193,6 @@ switchActiveProfile = async (req, res) => {
         }
         
         if(phoneNumber){
-            console.log('Checking for existing user with phone number:', phoneNumber);
             if(existingUser2) {
             return this.errorResponse(res, 'User already exists with this phone number', 409);
             }}
@@ -236,15 +211,10 @@ switchActiveProfile = async (req, res) => {
 
       await user.save();
 
-      console.log('User created successfully:', user);
-
       // Initialize settings and services manually if post-save hook fails
       try {
        let settings_services= await this.initializeUserSettingsAndServices(user._id, user.subscriptionType);
-     //  console.log('User settings and services initialized:', settings_services);
-      //  console.log('User settings and services initialized successfully');
       } catch (initError) {
-        console.log('Manual initialization failed:', initError);
         console.error('Manual initialization failed:', initError);
         // Continue with response even if initialization fails
       }
@@ -253,16 +223,12 @@ switchActiveProfile = async (req, res) => {
       const token = this.generateToken(user._id);
       const refreshToken = this.generateRefreshToken(user._id);
 
-      console.log('Generated tokens:', { token, refreshToken });
-
       // Return response matching AuthResult format
       return this.successResponse(res, 'User created successfully', {
         user: user.toJSON(),
         token,
         refreshToken
       }, 201);
-
-      console.log('Sign up successful:', user);
 
     } catch (error) {
       console.error('Sign up error:', error);
@@ -280,8 +246,6 @@ switchActiveProfile = async (req, res) => {
     }
 
     const { email, password, phoneNumber } = req.body;
-
-    console.log('sign in request body', req.body);
 
     // Build query conditions - only include phoneNumber if provided
     const queryConditions = [];
@@ -307,8 +271,6 @@ switchActiveProfile = async (req, res) => {
       return this.errorResponse(res, 'Invalid credentials', 401);
     }
 
-    console.log('retrieved user during sign in', user);
-
     // Check if user is using local auth
     if (user.authType !== 'local') {
       return this.errorResponse(res, 'Please use the appropriate sign-in method', 401);
@@ -317,7 +279,6 @@ switchActiveProfile = async (req, res) => {
     // Check password
     const isValidPassword = await user.comparePassword(password);
     if (!isValidPassword) {
-      console.log('password is not valid');
       return this.errorResponse(res, 'Invalid credentials', 401);
     }
 
@@ -325,7 +286,6 @@ switchActiveProfile = async (req, res) => {
     const token = this.generateToken(user._id);
     const refreshToken = this.generateRefreshToken(user._id);
     
-    console.log('successful logged in', user);
     return this.successResponse(res, 'Sign in successful', {
       user: user.toJSON(),
       token,
@@ -341,10 +301,9 @@ switchActiveProfile = async (req, res) => {
   deleteAll = async()=>{
     try{
      const res =  await User.deleteMany();
-       console.log('deleted succesfull');
     }
     catch(e){
-        console.log('error', e)
+        console.error('Delete all error:', e);
     }
   }
 
@@ -469,22 +428,16 @@ switchActiveProfile = async (req, res) => {
  // Get user services
 getUserServices = async (req, res) => {
   try {
-    console.log('it opened getUserServices', req.body);
-    
     // Get user from request body instead of req.user
     const { user, includeDisabled = false } = req.body;
     
     if (!user || !user.id) {
-      console.log('User data not provided in request body');
       return this.errorResponse(res, 'User data not provided', 400);
     }
 
     const userId = user.id;
 
-    const userServices = await UserService.getUserServices(userId, includeDisabled === true)
-     
-
-      console.log('User services retrieved:', userServices);
+    const userServices = await UserService.getUserServices(userId, includeDisabled === true);
 
     return this.successResponse(res, 'Services retrieved successfully', {
       data: userServices.map(us => ({
@@ -494,7 +447,6 @@ getUserServices = async (req, res) => {
     });
 
   } catch (error) {
-    console.log('Get user services error:', error);
     console.error('Get user services error:', error);
     return this.errorResponse(res, 'An error occurred while retrieving services', 500);
   }
@@ -503,7 +455,6 @@ getUserServices = async (req, res) => {
   // Get available services for user
   getAvailableServices = async (req, res) => {
     try {
-      console.log('it opened getAvailableServices', req.body);
       const userId = req.body.user.id;
       const { category, search, limit = 20 } = req.query;
 
@@ -618,7 +569,6 @@ getUserServices = async (req, res) => {
   // Get current user with settings and services
   getCurrentUser = async (req, res) => {
     try {
-     // console.log('Get current user request:', req.user);
       const userId = req.user.userId;
 
       const user = await User.findById(userId);
@@ -635,8 +585,6 @@ getUserServices = async (req, res) => {
 
       // Get user services
       const userServices = await UserService.getUserServices(userId);
-      //console.log('User services retrieved:', userServices);
-      //console.log('User settings retrieved:', settings);
 
       return this.successResponse(res, 'User retrieved successfully', {
         user: user.toJSON(),
@@ -1211,7 +1159,6 @@ getUsersByIds = async (req, res) => {
   // Get linked accounts and pending requests
   getLinkedAccounts = async (req, res) => {
     try {
-      console.log('Get linked accounts request:', req.user);
       const userId = req.user.userId;
       
       const user = await User.findById(userId);
@@ -1244,7 +1191,6 @@ getUsersByIds = async (req, res) => {
       });
 
     } catch (error) {
-      console.log('Get linked accounts error:', error);
       console.error('Get linked accounts error:', error);
       return this.errorResponse(res, 'An error occurred while retrieving linked accounts', 500);
     }
@@ -1257,7 +1203,6 @@ getUsersByIds = async (req, res) => {
 // Switch to buyer mode
 switchToBuyerMode = async (req, res) => {
   try { 
-    console.log('req.body in switching profile', req.body);
     const userId = req.user.userId;
 
     const user = await User.findById(userId);
@@ -1272,7 +1217,6 @@ switchToBuyerMode = async (req, res) => {
     });
 
   } catch (error) {
-    console.log('switch to buyer error', error);
     console.error('Switch to buyer mode error:', error);
     return this.errorResponse(res, 'An error occurred while switching to buyer mode', 500);
   }
@@ -1284,22 +1228,17 @@ getUserByEmail = async (req, res) => {
   try {
     const { email } = req.params;
 
-    console.log('🔍 Fetching user by email:', email);
-
     // Find user by email
     const user = await User.findOne({ email: email.toLowerCase() })
       .select('name email profilePicture phoneNumber createdAt')
       .lean();
 
     if (!user) {
-      console.log('❌ User not found:', email);
       return res.status(404).json({
         success: false,
         message: 'User not found',
       });
     }
-
-    console.log('✅ User found:', user.name);
 
     res.status(200).json({
       success: true,

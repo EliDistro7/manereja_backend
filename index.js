@@ -14,7 +14,7 @@ const userRoutes = require('./routes/manereja/auth_routes.js');
 const serviceRoutes = require('./routes/manereja/service_routes.js');
 
 
-const notificationsRoutes = require("./routes/notifications-routes.js");
+
 const syncRoutes = require("./routes/manereja/sync-routes.js");
 const profileRoutes = require("./routes/manereja/profile-routes");
 const salesItemRoutes= require('./routes/manereja/salesItem-routes.js');
@@ -109,7 +109,7 @@ app.use('/locations', locationRoutes);
 app.use('/', userRoutes);
 app.use('/', serviceRoutes);
 
-app.use('/', notificationsRoutes);
+
 app.use('/sync', syncRoutes);
 app.use('/profiles', profileRoutes);
 app.use('/api/sales-items', salesItemRoutes);
