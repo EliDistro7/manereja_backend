@@ -380,41 +380,84 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
     }
   });
 
-  // ==========================================
-  // GET REPORT SUBMISSIONS
-  // ==========================================
-  socket.on('get_report_submissions', async ({
-    taskId, projectId, templateId, employeeId,
-    status, startDate, endDate, userId
-  }) => {
-    try {
-      const query = { isDeleted: false };
-      if (taskId) query.taskId = taskId;
-      if (projectId) query.projectId = projectId;
-      if (templateId) query.templateId = templateId;
-      if (employeeId) query.submittedBy = employeeId;
-      if (status) query.status = status;
-      if (startDate || endDate) {
-        query.submissionDate = {};
-        if (startDate) query.submissionDate.$gte = new Date(startDate);
-        if (endDate) query.submissionDate.$lte = new Date(endDate);
-      }
-
-      const submissions = await ReportSubmission.find(query)
-        .populate('submittedBy', 'name email profilePicture')
-        .populate('reviewedBy', 'name email')
-        .sort({ submissionDate: -1, createdAt: -1 });
-
-      socket.emit('report_submissions_list', {
-        submissions: submissions.map(s => formatReportSubmission(s)),
-      });
-
-      console.log('reports submitted', submissions);
-    } catch (error) {
-      console.error('❌ Error fetching report submissions:', error);
-      socket.emit('tasker_error', { error: 'Failed to fetch report submissions' });
+ // ==========================================
+// GET REPORT SUBMISSIONS
+// ✅ FIXED: Owner sees ALL submissions, employees see only their own
+// ==========================================
+socket.on('get_report_submissions', async ({
+  taskId, projectId, templateId, employeeId,
+  status, startDate, endDate, userId
+}) => {
+  try {
+    console.log('📊 Getting report submissions for userId:', userId);
+    
+    const query = { isDeleted: false };
+    
+    // ✅ BUILD QUERY BASED ON FILTERS
+    if (taskId) query.taskId = taskId;
+    if (projectId) query.projectId = projectId;
+    if (templateId) query.templateId = templateId;
+    if (status) query.status = status;
+    if (startDate || endDate) {
+      query.submissionDate = {};
+      if (startDate) query.submissionDate.$gte = new Date(startDate);
+      if (endDate) query.submissionDate.$lte = new Date(endDate);
     }
-  });
+
+    // ✅ CHECK IF USER IS OWNER
+    let isOwner = false;
+    if (projectId) {
+      const project = await Project.findById(projectId);
+      if (project) {
+        const profile = await BusinessProfile.findById(project.businessProfileId);
+        isOwner = profile && profile.ownerId.toString() === userId;
+      }
+    } else if (taskId) {
+      const task = await Task.findById(taskId);
+      if (task) {
+        const project = await Project.findById(task.projectId);
+        if (project) {
+          const profile = await BusinessProfile.findById(project.businessProfileId);
+          isOwner = profile && profile.ownerId.toString() === userId;
+        }
+      }
+    }
+
+    // ✅ OWNER SEES ALL, EMPLOYEE SEES ONLY THEIR OWN
+    if (!isOwner) {
+      // If specific employeeId was requested and user is not owner, only allow their own
+      if (employeeId && employeeId !== userId) {
+        socket.emit('tasker_error', { error: 'You can only view your own submissions' });
+        return;
+      }
+      query.submittedBy = userId; // Employees only see their submissions
+      console.log('👤 Employee view: filtering to userId', userId);
+    } else {
+      // Owner can filter by specific employee if requested
+      if (employeeId) {
+        query.submittedBy = employeeId;
+        console.log('👑 Owner view: filtering to employeeId', employeeId);
+      } else {
+        console.log('👑 Owner view: showing ALL submissions');
+      }
+    }
+
+    const submissions = await ReportSubmission.find(query)
+      .populate('submittedBy', 'name email profilePicture')
+      .populate('reviewedBy', 'name email')
+      .sort({ submissionDate: -1, createdAt: -1 });
+
+    console.log(`✅ Found ${submissions.length} submissions (isOwner: ${isOwner})`);
+
+    socket.emit('report_submissions_list', {
+      submissions: submissions.map(s => formatReportSubmission(s)),
+    });
+
+  } catch (error) {
+    console.error('❌ Error fetching report submissions:', error);
+    socket.emit('tasker_error', { error: 'Failed to fetch report submissions' });
+  }
+});
 
   // ==========================================
   // APPROVE REPORT SUBMISSION (Owner only)

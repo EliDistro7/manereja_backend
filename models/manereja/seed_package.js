@@ -119,7 +119,7 @@ async function seedPackages() {
     // ✅ Package 2: Task Management & Team Operations
     const taskManagementPackage = new Package({
       name: 'task_management_suite',
-      displayName: 'Task Management & Team Operations',
+      displayName: 'Project Management & Team Operations',
       displayNameSwahili: 'Mpango wa Usimamizi wa Kazi na Timu',
       description: 'Project management, team coordination, task tracking, and attendance monitoring for businesses with employees',
       descriptionSwahili: 'Usimamizi wa miradi, uratibu wa timu, ufuatiliaji wa kazi, na ufuatiliaji wa mahudhurio kwa biashara zenye wafanyakazi',
@@ -240,7 +240,7 @@ async function upsertPackages() {
       { name: 'task_management_suite' },
       {
         name: 'task_management_suite',
-        displayName: 'Task Management & Team Operations',
+        displayName: 'Project Management & Team Operations',
         displayNameSwahili: 'Mpango wa Usimamizi wa Kazi na Timu',
         description: 'Project management, team coordination, task tracking, and attendance monitoring',
         descriptionSwahili: 'Usimamizi wa miradi, uratibu wa timu, ufuatiliaji wa kazi, na mahudhurio',

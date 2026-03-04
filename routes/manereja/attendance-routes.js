@@ -415,7 +415,9 @@ router.post('/check-in', authenticate, async (req, res) => {
     }
 
     // ✅ TIMEZONE FIX: Use client's local time. Fall back to server time only if not sent.
-    const checkInTime = clientCheckInTime ? new Date(clientCheckInTime) : new Date();
+   const checkInTime = clientCheckInTime 
+  ? new Date(clientCheckInTime) 
+  : new Date(Date.now() + 3 * 60 * 60 * 1000);
 
     // ✅ TIMEZONE FIX: Build today's boundaries from client's date string, not
     // server's new Date() which would resolve to UTC midnight on a UTC server,
@@ -625,7 +627,9 @@ router.put('/check-out/:attendanceId', authenticate, async (req, res) => {
     if (settings?.requirePhoto && !checkOutPhotoUrl) return res.status(400).json({ message: 'A selfie photo is required for check-out' });
 
     // ✅ TIMEZONE FIX: Use client's local checkout time
-    const checkOutTime = clientCheckOutTime ? new Date(clientCheckOutTime) : new Date();
+    const checkOutTime = clientCheckOutTime 
+  ? new Date(clientCheckOutTime) 
+  : new Date(Date.now() + 3 * 60 * 60 * 1000);
     const workDuration = calculateWorkDuration(attendance.checkInTime, checkOutTime);
 
     let isEarlyDeparture = false;

@@ -94,7 +94,7 @@ mongoose.connect(process.env.MONGO_URL, {
     console.log("Connected to MongoDB");
    //
    // TanzaniaSeed.seedTanzaniaLocations();
-   
+  // PackagesSeed.upsertPackages();
 })
 .catch((err) => {
     console.log("NOT CONNECTED TO NETWORK", err);
