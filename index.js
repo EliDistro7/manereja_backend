@@ -12,6 +12,7 @@ dotenv.config();
 
 const userRoutes = require('./routes/manereja/auth_routes.js');
 const serviceRoutes = require('./routes/manereja/service_routes.js');
+const emailService = require('./services/emailService.js');
 
 
 
@@ -26,6 +27,7 @@ const projectRoutes = require('./routes/manereja/project-routes.js');
 const taskRoutes = require('./routes/manereja/task-routes.js');
 const packageRoutes = require('./routes/manereja/package-routes.js');
 const systemNotificationRoutes = require('./routes/manereja/systemNotificationRoutes.js');
+const emailRoutes= require('./routes/manereja/email-routes.js');
 
 const PORT = process.env.PORT || 5000;
 
@@ -94,7 +96,7 @@ mongoose.connect(process.env.MONGO_URL, {
     console.log("Connected to MongoDB");
    //
    // TanzaniaSeed.seedTanzaniaLocations();
-  // PackagesSeed.upsertPackages();
+   //PackagesSeed.seedPackages();
 })
 .catch((err) => {
     console.log("NOT CONNECTED TO NETWORK", err);
@@ -116,6 +118,8 @@ app.use('/api/sales-items', salesItemRoutes);
 app.use('/api/attendance', attendanceRoutes);
 app.use('/api/projects', projectRoutes);
 app.use('/api/tasks', taskRoutes);
+
+app.use('/emails', emailRoutes);
 
 app.use('/api/system-notifications', systemNotificationRoutes);
 
