@@ -28,6 +28,7 @@ const taskRoutes = require('./routes/manereja/task-routes.js');
 const packageRoutes = require('./routes/manereja/package-routes.js');
 const systemNotificationRoutes = require('./routes/manereja/systemNotificationRoutes.js');
 const emailRoutes= require('./routes/manereja/email-routes.js');
+const authEmailRoutes = require('./routes/manereja/auth_email.js');
 
 const PORT = process.env.PORT || 5000;
 
@@ -122,6 +123,8 @@ app.use('/api/tasks', taskRoutes);
 app.use('/emails', emailRoutes);
 
 app.use('/api/system-notifications', systemNotificationRoutes);
+
+app.use('/api/emails',authEmailRoutes);
 
 
 // Start the server - IMPORTANT: bind to all interfaces

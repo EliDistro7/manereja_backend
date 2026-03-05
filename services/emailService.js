@@ -1,4 +1,6 @@
 const nodemailer = require('nodemailer');
+const dotenv = require("dotenv");
+dotenv.config();
 
 // ─────────────────────────────────────────────
 // Transporter (Gmail SMTP + App Password)
@@ -23,6 +25,8 @@ transporter.verify((error) => {
 // ─────────────────────────────────────────────
 // Base HTML wrapper (shared branding)
 // ─────────────────────────────────────────────
+const LOGO_URL = 'https://res.cloudinary.com/dh3bzuzyb/image/upload/v1772730584/manereja_hvqr57.png';
+
 function baseTemplate(title, bodyHtml) {
   return `
   <!DOCTYPE html>
@@ -39,9 +43,13 @@ function baseTemplate(title, bodyHtml) {
           
           <!-- Header -->
           <tr>
-            <td style="background:#84cc16;padding:24px 32px;">
-              <h1 style="margin:0;color:#ffffff;font-size:22px;font-weight:700;">Biashara App</h1>
-              <p style="margin:4px 0 0;color:#f0fdf4;font-size:13px;">Biashara yako, mikono yako</p>
+            <td style="background:#84cc16;padding:20px 32px;text-align:center;">
+              <img
+                src="${LOGO_URL}"
+                alt="Manereja"
+                width="140"
+                style="display:block;margin:0 auto;height:auto;max-height:56px;object-fit:contain;"
+              />
             </td>
           </tr>
 
@@ -56,7 +64,7 @@ function baseTemplate(title, bodyHtml) {
           <tr>
             <td style="background:#f9fafb;padding:20px 32px;border-top:1px solid #e5e7eb;">
               <p style="margin:0;font-size:12px;color:#9ca3af;text-align:center;">
-                &copy; ${new Date().getFullYear()} Biashara App &bull; Dar es Salaam, Tanzania<br/>
+                &copy; ${new Date().getFullYear()} Manereja App &bull; Dar es Salaam, Tanzania<br/>
                 Ukipata tatizo, wasiliana nasi: <a href="mailto:${process.env.GMAIL_USER}" style="color:#84cc16;">${process.env.GMAIL_USER}</a>
               </p>
             </td>
@@ -74,7 +82,7 @@ function baseTemplate(title, bodyHtml) {
 // ─────────────────────────────────────────────
 async function sendEmail({ to, subject, html, text }) {
   const info = await transporter.sendMail({
-    from: `"Biashara App" <${process.env.GMAIL_USER}>`,
+    from: `"Manereja" <${process.env.GMAIL_USER}>`,
     to,
     subject,
     html,
@@ -130,7 +138,7 @@ async function sendOTP(to, otp, purpose = 'login', expiresIn = 10) {
 
   return sendEmail({
     to,
-    subject: `${otp} - ${label.title} | Biashara App`,
+    subject: `${otp} - ${label.title} | Manereja App`,
     html: baseTemplate(label.title, body)
   });
 }
@@ -178,13 +186,13 @@ async function sendReceipt(to, receipt) {
     </table>
 
     <p style="color:#9ca3af;font-size:13px;margin:0;">
-      Asante kwa kutumia Biashara App. Hifadhi barua pepe hii kama risiti yako.
+      Asante kwa kutumia Manereja App. Hifadhi barua pepe hii kama risiti yako.
     </p>
   `;
 
   return sendEmail({
     to,
-    subject: `Risiti ya Malipo - ${packageName} | Biashara App`,
+    subject: `Risiti ya Malipo - ${packageName} | Manereja App`,
     html: baseTemplate('Malipo Yamekamilika', body)
   });
 }
@@ -196,7 +204,7 @@ async function sendReceipt(to, receipt) {
  */
 async function sendWelcomeEmail(to, { userName, packageName }) {
   const body = `
-    <h2 style="margin:0 0 4px;color:#111827;font-size:20px;">Karibu Biashara App! 🎉</h2>
+    <h2 style="margin:0 0 4px;color:#111827;font-size:20px;">Karibu Manereja App! 🎉</h2>
     <p style="color:#6b7280;font-size:14px;margin:0 0 24px;">Welcome aboard</p>
 
     <p style="color:#374151;font-size:15px;margin:0 0 16px;">
@@ -215,14 +223,14 @@ async function sendWelcomeEmail(to, { userName, packageName }) {
       <li>Kuona ripoti za biashara</li>
     </ul>
 
-    <a href="${process.env.APP_URL || '#'}" style="display:inline-block;background:#84cc16;color:#ffffff;padding:12px 28px;border-radius:6px;font-weight:700;text-decoration:none;font-size:14px;">
+    <a href="${process.env.APP_SCHEME}://open" style="display:inline-block;background:#84cc16;color:#ffffff;padding:12px 28px;border-radius:6px;font-weight:700;text-decoration:none;font-size:14px;">
       Fungua App →
     </a>
   `;
 
   return sendEmail({
     to,
-    subject: `Karibu Biashara App - Akaunti Yako Iko Tayari!`,
+    subject: `Karibu Manereja App - Akaunti Yako Iko Tayari!`,
     html: baseTemplate('Karibu!', body)
   });
 }
@@ -263,7 +271,7 @@ async function sendNotification(to, { title, titleSwahili, message, type = 'info
 
   return sendEmail({
     to,
-    subject: `${s.icon} ${title} | Biashara App`,
+    subject: `${s.icon} ${title} | Manereja  App`,
     html: baseTemplate(title, body)
   });
 }
@@ -306,7 +314,7 @@ async function sendLowStockAlert(to, items) {
 
   return sendEmail({
     to,
-    subject: `⚠️ Tahadhari: Stock Iko Chini (${items.length} bidhaa) | Biashara App`,
+    subject: `⚠️ Tahadhari: Stock Iko Chini (${items.length} bidhaa) | Manereja App`,
     html: baseTemplate('Low Stock Alert', body)
   });
 }
@@ -337,7 +345,7 @@ async function sendSubscriptionReminder(to, { userName, packageName, expiryDate,
       <p style="margin:8px 0 0;font-size:13px;color:#6b7280;">Siku ${daysLeft} zimebaki</p>
     </div>
 
-    <a href="${process.env.APP_URL || '#'}/subscription/renew" style="display:inline-block;background:#84cc16;color:#ffffff;padding:12px 28px;border-radius:6px;font-weight:700;text-decoration:none;font-size:14px;">
+    <a href="${process.env.APP_SCHEME}://subscription/renew" style="display:inline-block;background:#84cc16;color:#ffffff;padding:12px 28px;border-radius:6px;font-weight:700;text-decoration:none;font-size:14px;">
       Lipia Sasa →
     </a>
 
@@ -348,7 +356,7 @@ async function sendSubscriptionReminder(to, { userName, packageName, expiryDate,
 
   return sendEmail({
     to,
-    subject: `${isUrgent ? '🚨' : '⏰'} Usajili Unakwisha Siku ${daysLeft} | Biashara App`,
+    subject: `${isUrgent ? '🚨' : '⏰'} Usajili Unakwisha Siku ${daysLeft} | Manereja App`,
     html: baseTemplate('Subscription Reminder', body)
   });
 }
@@ -401,7 +409,7 @@ async function sendSupportConfirmation(to, { userName, ticketId, subject, messag
 
   return sendEmail({
     to,
-    subject: `[#${ticketId}] Ombi Lako Limepokelewa | Biashara App`,
+    subject: `[#${ticketId}] Ombi Lako Limepokelewa | Manereja App`,
     html: baseTemplate('Support Confirmation', body)
   });
 }
@@ -454,6 +462,7 @@ module.exports = {
   // Transactional
   sendReceipt,
   sendWelcomeEmail,
+  sendEmail,
 
   // Notifications
   sendNotification,

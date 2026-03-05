@@ -80,6 +80,28 @@ const UserSchema = new mongoose.Schema({
     type: Boolean, 
     default: false 
   },
+
+  // In UserSchema, add these alongside isEmailVerified:
+isEmailVerified: { 
+  type: Boolean, 
+  default: false 
+},
+emailVerificationToken: {
+  type: String,
+  default: null,
+},
+emailVerificationTokenExpires: {
+  type: Date,
+  default: null,
+},
+passwordResetToken: {
+  type: String,
+  default: null,
+},
+passwordResetTokenExpires: {
+  type: Date,
+  default: null,
+},
   password: { 
     type: String, 
     required: function() { return this.authType === 'local'; } 
@@ -186,6 +208,7 @@ const UserSchema = new mongoose.Schema({
     type: Date,
     default: null
   },
+  hasUsedTrial: { type: Boolean, default: false },
   remainingBalance: {
     type: Number,
     default: 0,
@@ -511,6 +534,7 @@ UserSchema.methods.toJSON = function() {
 
   userObject.id = userObject._id;
   delete userObject._id;
+  userObject.hasUsedTrial = this.hasUsedTrial ?? false;
 
   // Transform profile IDs to strings
   userObject.businessProfileIds = (userObject.businessProfileIds || []).map(id => id.toString());
@@ -542,6 +566,7 @@ UserSchema.index({ phoneNumber: 1 }, { unique: true, sparse: true });
 UserSchema.index({ googleId: 1 }, { sparse: true });
 UserSchema.index({ email: 1, authType: 1 }, { sparse: true });
 UserSchema.index({ phoneNumber: 1, authType: 1 }, { sparse: true });
+UserSchema.index({ hasUsedTrial: 1 });
 UserSchema.index({ subscriptionType: 1 });
 UserSchema.index({ freeTrialEndDate: 1 });
 UserSchema.index({ premiumExpiryDate: 1 });
