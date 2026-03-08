@@ -251,8 +251,8 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
       if (!project) { socket.emit('tasker_error', { error: 'Project not found' }); return; }
 
       const profile = await BusinessProfile.findById(project.businessProfileId);
-      if (!profile || profile.ownerId.toString() !== userId) {
-        socket.emit('tasker_error', { error: 'Only owner can create tasks' });
+      if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+  socket.emit('tasker_error', { error: 'Only owner or admin can create tasks' });
         return;
       }
 
@@ -363,8 +363,8 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
       const project = await Project.findById(task.projectId);
       const profile = await BusinessProfile.findById(project.businessProfileId);
 
-      if (!profile || profile.ownerId.toString() !== userId) {
-        socket.emit('tasker_error', { error: 'Only owner can assign tasks' });
+      if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+  socket.emit('tasker_error', { error: 'Only owner or admin can assign tasks' });
         return;
       }
 
@@ -432,11 +432,11 @@ socket.on('add_task_assignee', async ({ taskId, assigneeId, userId }) => {
     const project = await Project.findById(task.projectId);
     const profile = await BusinessProfile.findById(project.businessProfileId);
 
-    if (!profile || profile.ownerId.toString() !== userId) {
-      socket.emit('tasker_error', { error: 'Only owner can assign tasks' });
+    if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+  socket.emit('tasker_error', { error: 'Only owner or admin can assign tasks' });
       return;
     }
-console.log('assigned Id', assigneeId);
+
     // ✅ Check profile access (not project membership)
     if (!profile.hasAccess(assigneeId)) {
       console.log('User is not in this business profile');
@@ -497,8 +497,8 @@ if (alreadyAssigned) {
       const project = await Project.findById(task.projectId);
       const profile = await BusinessProfile.findById(project.businessProfileId);
 
-      if (!profile || profile.ownerId.toString() !== userId) {
-        socket.emit('tasker_error', { error: 'Only owner can unassign tasks' });
+  if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+  socket.emit('tasker_error', { error: 'Only owner or admin can unassign tasks' });
         return;
       }
 
@@ -542,8 +542,8 @@ if (alreadyAssigned) {
       const project = await Project.findById(task.projectId);
       const profile = await BusinessProfile.findById(project.businessProfileId);
 
-      if (!profile || profile.ownerId.toString() !== userId) {
-        socket.emit('tasker_error', { error: 'Only owner can reassign tasks' });
+     if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+  socket.emit('tasker_error', { error: 'Only owner or admin can reassign tasks' });
         return;
       }
 
@@ -663,8 +663,8 @@ if (alreadyAssigned) {
       const project = await Project.findById(task.projectId);
       const profile = await BusinessProfile.findById(project.businessProfileId);
 
-      if (!profile || profile.ownerId.toString() !== userId) {
-        socket.emit('tasker_error', { error: 'Only owner can override task progress' });
+   if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+  socket.emit('tasker_error', { error: 'Only owner or admin can override task progress' })
         return;
       }
 
@@ -703,8 +703,51 @@ if (alreadyAssigned) {
     }
   });
 
+
   // ==========================================
-  // UPDATE TASK TASKPLACE SETTINGS (Owner only)
+// UPDATE TASK FIELDS (title, description, priority, dates, tags, estimatedHours)
+// ==========================================
+socket.on('update_task', async ({ taskId, updates, userId }) => {
+  try {
+    const task = await Task.findById(taskId);
+    if (!task) { socket.emit('tasker_error', { error: 'Task not found' }); return; }
+
+    const project = await Project.findById(task.projectId);
+    const profile = await BusinessProfile.findById(project.businessProfileId);
+
+    if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+      socket.emit('tasker_error', { error: 'Only owner or admin can update tasks' });
+      return;
+    }
+
+    // Apply only the fields that were sent
+    const allowedFields = ['title', 'description', 'priority', 'dueDate', 'startDate', 'estimatedHours', 'tags'];
+    for (const field of allowedFields) {
+      if (updates[field] !== undefined) {
+        task[field] = updates[field];
+      }
+    }
+
+    task.updatedAt = new Date();
+    await task.save();
+    await task.populate('assignedTo', 'name email profilePicture');
+    await task.populate('createdBy', 'name email');
+
+    broadcastToProject(io, userSockets, project, 'task_updated', {
+      task: formatTask(task),
+      updateType: 'fields_updated',
+      updatedBy: userId,
+    });
+
+    socket.emit('task_update_success', { success: true, task: formatTask(task) });
+  } catch (error) {
+    console.error('❌ Error updating task:', error);
+    socket.emit('tasker_error', { error: 'Failed to update task', details: error.message });
+  }
+});
+
+  // ==========================================
+  // UPDATE TASK TASKPLACE SETTINGS 
   // ==========================================
   socket.on('update_task_taskplace', async ({
     taskId, taskplaceLocation, taskplaceRadius,
@@ -722,8 +765,8 @@ if (alreadyAssigned) {
       if (!project) { socket.emit('tasker_error', { error: 'Project not found' }); return; }
 
       const profile = await BusinessProfile.findById(project.businessProfileId);
-      if (!profile || profile.ownerId.toString() !== userId) {
-        socket.emit('tasker_error', { error: 'Only owner can update taskplace settings' });
+      if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+  socket.emit('tasker_error', { error: 'Only owner or admin can update taskplace settings' });
         return;
       }
 
@@ -1254,6 +1297,13 @@ if (alreadyAssigned) {
       io.to(socketId).emit(event, data);
     }
   }
+
+  async function isOwnerOrAdmin(profile, userId) {
+  if (!profile) return false;
+  if (profile.ownerId.toString() === userId) return true;
+  const member = profile.members?.[userId];
+  return member?.role === 'admin';
+}
 
   function formatEmbeddedLocation(loc) {
     if (!loc || loc.coordinates?.latitude == null) return null;

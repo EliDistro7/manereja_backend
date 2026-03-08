@@ -163,9 +163,10 @@ function initSocket(server) {
           io.emit('userConnected', { user: userWithSocket });
         }
 
-        socket.emit('loginUserAck', { status: 'ok', user: userDetails });
+        // Notify this user's conversations about their online status
+_emitToUser(userId, 'user_online', { userId });
 
-        console.log(`✅ userSockets[${userId}] has ${userSockets[userId].size} socket(s)`);
+    
       } catch (error) {
         console.error('Error fetching user details:', error);
         socket.emit('loginUserAck', {
@@ -270,7 +271,9 @@ function initSocket(server) {
         if (!userSockets[userId]) {
           const idx = onlineUsers.findIndex(u => u._id?.toString() === userId);
           if (idx !== -1) onlineUsers.splice(idx, 1);
-          console.log(`✅ User ${userId} is now fully offline`);
+       
+
+          io.emit('user_offline', { userId });
         } else {
           console.log(
             `ℹ️  User ${userId} still has ${userSockets[userId].size} socket(s) — staying online`,

@@ -41,9 +41,9 @@ function baseTemplate(title, bodyHtml) {
       <tr><td align="center">
         <table width="600" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08);">
           
-          <!-- Header -->
+          <!-- Header: dark charcoal so lime green logo is clearly visible -->
           <tr>
-            <td style="background:#84cc16;padding:20px 32px;text-align:center;">
+            <td style="background:#212529;padding:22px 32px;text-align:center;">
               <img
                 src="${LOGO_URL}"
                 alt="Manereja"
@@ -51,6 +51,11 @@ function baseTemplate(title, bodyHtml) {
                 style="display:block;margin:0 auto;height:auto;max-height:56px;object-fit:contain;"
               />
             </td>
+          </tr>
+
+          <!-- Lime accent strip -->
+          <tr>
+            <td style="background:#84cc16;height:3px;font-size:0;line-height:0;">&nbsp;</td>
           </tr>
 
           <!-- Body -->

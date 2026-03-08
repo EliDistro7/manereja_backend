@@ -1148,8 +1148,8 @@ socket.on('get_report_submissions', async ({
       if (!submission) { socket.emit('tasker_error', { error: 'Submission not found' }); return; }
 
       const profile = await BusinessProfile.findById(submission.businessProfileId);
-      if (!profile || profile.ownerId.toString() !== userId) {
-        socket.emit('tasker_error', { error: 'Only owner can reject reports' });
+     if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+  socket.emit('tasker_error', { error: 'Only owner or admin can reject reports' });
         return;
       }
 

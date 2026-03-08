@@ -131,6 +131,17 @@ module.exports = function messageEvents(io, socket, userSockets, roomSocketsMap,
   });
 
   // ==========================================
+// ONLINE STATUS CHECK
+// ==========================================
+socket.on('check_online_status', ({ userIds }) => {
+  const result = {};
+  for (const uid of userIds) {
+    result[uid] = !!(userSockets[uid] && userSockets[uid].size > 0);
+  }
+  socket.emit('online_status_result', result);
+});
+
+  // ==========================================
   // ADD REACTION
   // ==========================================
   socket.on('add_reaction', async ({ messageId, emoji }) => {
