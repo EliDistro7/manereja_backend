@@ -29,6 +29,8 @@ const packageRoutes = require('./routes/manereja/package-routes.js');
 const systemNotificationRoutes = require('./routes/manereja/systemNotificationRoutes.js');
 const emailRoutes= require('./routes/manereja/email-routes.js');
 const authEmailRoutes = require('./routes/manereja/auth_email.js');
+const seedAdmin = require('./models/manereja/seed_admin.js');
+const adminRoutes = require('./routes/manereja/admin-routes.js');
 
 const PORT = process.env.PORT || 5000;
 
@@ -98,6 +100,7 @@ mongoose.connect(process.env.MONGO_URL, {
    //
    // TanzaniaSeed.seedTanzaniaLocations();
    //PackagesSeed.seedPackages();
+    //seedAdmin();
 })
 .catch((err) => {
     console.log("NOT CONNECTED TO NETWORK", err);
@@ -112,7 +115,7 @@ app.use('/locations', locationRoutes);
 app.use('/', userRoutes);
 app.use('/', serviceRoutes);
 
-
+app.use('/auth', adminRoutes);
 app.use('/sync', syncRoutes);
 app.use('/profiles', profileRoutes);
 app.use('/api/sales-items', salesItemRoutes);
