@@ -99,22 +99,26 @@ router.post('/users/:userId/subscribe', async (req, res) => {
     // ── 3. Verify package ───────────────────────────────────────────────
     const pkg = await Package.findById(packageId);
     if (!pkg) {
+      console.log('package not found');
       return res.status(404).json({ success: false, message: 'Package not found' });
     }
 
-    // ── 4. Block duplicate active subscription ──────────────────────────
-    const existingSubscription = await UserPackageSubscription.findOne({
-      userId: req.params.userId,
-      packageId,
-      status: 'active',
-      expiryDate: { $gt: new Date() },
-    });
-    if (existingSubscription) {
-      return res.status(400).json({
-        success: false,
-        message: 'You already have an active subscription to this package.',
-      });
-    }
+  // ── 4. Block duplicate active subscription ──────────────────────────
+const existingSubscription = await UserPackageSubscription.findOne({
+  userId: req.params.userId,
+  packageId,
+  status: { $in: ['active', 'trial'] },
+  expiryDate: { $gt: new Date() },
+});
+if (existingSubscription) {
+  await existingSubscription.populate('packageId');
+  return res.status(200).json({
+    success: true,
+    message: 'Already subscribed',
+    code: 'ALREADY_SUBSCRIBED',
+    subscription: existingSubscription,   // ← Flutter updates cache from this
+  });
+}
 
     // ── 5. Calculate dates ──────────────────────────────────────────────
     const startDate  = new Date();

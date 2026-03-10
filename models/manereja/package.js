@@ -355,12 +355,25 @@ UserPackageSubscriptionSchema.methods.recordLogin = async function() {
   return this;
 };
 
-// ✅ Static method to get user's active packages
+// REPLACE the existing getActivePackages static:
 UserPackageSubscriptionSchema.statics.getActivePackages = async function(userId) {
+  const now = new Date();
+  
+  // Auto-expire any subscriptions that have passed their expiryDate
+  await this.updateMany(
+    {
+      userId,
+      status: { $in: ['active', 'trial'] },
+      expiryDate: { $lte: now },
+    },
+    { $set: { status: 'expired' } }
+  );
+
+  // Now return only genuinely active ones
   return this.find({
     userId,
     status: { $in: ['active', 'trial'] },
-    expiryDate: { $gt: new Date() }
+    expiryDate: { $gt: now },
   }).populate('packageId');
 };
 
@@ -413,19 +426,19 @@ UserPackageSubscriptionSchema.statics.calculateAgentCommissions = async function
   return totalCommission;
 };
 
-// ✅ Pre-save hook to handle status changes
+// REPLACE the existing pre-save hook:
 UserPackageSubscriptionSchema.pre('save', function(next) {
   const now = new Date();
   
-  // Auto-expire if past expiry date (skip on initial creation)
-  if (!this.isNew && (this.status === 'active' || this.status === 'trial') && this.expiryDate <= now) {
+  // Auto-expire if past expiry date (all saves, not just updates)
+  if ((this.status === 'active' || this.status === 'trial') && this.expiryDate <= now) {
     this.status = 'expired';
   }
   
   // Set trial end date if trial
   if (this.isTrial && !this.trialEndDate) {
     this.trialEndDate = new Date(this.startDate);
-    this.trialEndDate.setDate(this.trialEndDate.getDate() + 7); // 7-day trial
+    this.trialEndDate.setDate(this.trialEndDate.getDate() + 7);
   }
   
   next();

@@ -31,6 +31,7 @@ const emailRoutes= require('./routes/manereja/email-routes.js');
 const authEmailRoutes = require('./routes/manereja/auth_email.js');
 const seedAdmin = require('./models/manereja/seed_admin.js');
 const adminRoutes = require('./routes/manereja/admin-routes.js');
+require('./cron/expireSubscriptions');
 
 const PORT = process.env.PORT || 5000;
 
