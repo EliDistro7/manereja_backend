@@ -13,6 +13,7 @@ dotenv.config();
 const userRoutes = require('./routes/manereja/auth_routes.js');
 const serviceRoutes = require('./routes/manereja/service_routes.js');
 const emailService = require('./services/emailService.js');
+const agentsRouter = require('./routes/manereja/agents');
 
 
 
@@ -100,7 +101,7 @@ mongoose.connect(process.env.MONGO_URL, {
     console.log("Connected to MongoDB");
    //
    // TanzaniaSeed.seedTanzaniaLocations();
-   //PackagesSeed.seedPackages();
+  // PackagesSeed.seedPackages();
     //seedAdmin();
 })
 .catch((err) => {
@@ -115,6 +116,7 @@ app.use('/', packageRoutes);
 app.use('/locations', locationRoutes);
 app.use('/', userRoutes);
 app.use('/', serviceRoutes);
+app.use('/auth/agents', agentsRouter);
 
 app.use('/auth', adminRoutes);
 app.use('/sync', syncRoutes);
