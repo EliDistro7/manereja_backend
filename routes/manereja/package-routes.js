@@ -130,21 +130,28 @@ if (existingSubscription) {
     }
 
     // ── 6. Create subscription ──────────────────────────────────────────
-    const subscription = new UserPackageSubscription({
-      userId:    req.params.userId,
-      packageId,
-      status:    isTrial ? 'trial' : 'active',
-      startDate,
-      expiryDate,
-      isTrial,
-      trialEndDate: isTrial ? expiryDate : null,
-      acquiredBy: {
-        agentId:             agentId   || null,
-        agentName:           agentName || null,
-        commissionRate:      0.30,
-        totalCommissionPaid: 0,
-      },
-    });
+   // ── 6. Create subscription ──────────────────────────────────────────
+const subscription = new UserPackageSubscription({
+  userId:    req.params.userId,
+  packageId,
+  status:    isTrial ? 'trial' : 'active',
+  startDate,
+  expiryDate,
+  isTrial,
+  trialEndDate: isTrial ? expiryDate : null,
+  
+  // ← ADD THESE for paid subscriptions
+  lastPaymentDate:   isTrial ? null : new Date(),
+  lastPaymentAmount: isTrial ? 0 : pkg.price.amount,
+  totalPaid:         isTrial ? 0 : pkg.price.amount,   // ← was always 0
+  
+  acquiredBy: {
+    agentId:             agentId   || null,
+    agentName:           agentName || null,
+    commissionRate:      0.30,
+    totalCommissionPaid: 0,
+  },
+});
     await subscription.save();
 
     // ── 7. Mark trial as used on the user record ────────────────────────
