@@ -17,6 +17,8 @@ const authenticateToken = async (req, res, next) => {
     }
     console.log('Token received:', token);
 
+   
+
     // Verify token
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     

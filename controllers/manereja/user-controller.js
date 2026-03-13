@@ -8,11 +8,15 @@ const { validationResult } = require('express-validator');
 const BusinessProfile = require('../../models/manereja/business-profile.js');
 
 
+
+
 class UserController {
   constructor() {
     // Validate required environment variables
     this.validateEnvironmentVariables();
   }
+
+  
 
   validateEnvironmentVariables() {
     const requiredEnvVars = ['JWT_SECRET', 'JWT_REFRESH_SECRET'];
@@ -110,9 +114,22 @@ switchActiveProfile = async (req, res) => {
   }
 };
 
+static deleteUserByEmail = async (email) => {
+  const user = await User.findOneAndDelete({ email: email.toLowerCase() });
+  if (!user) {
+    console.log(`⚠️  No user found with email: ${email}`);
+    return null;
+  }
+  console.log(`🗑️  Deleted user: ${user.email} (${user._id})`);
+  return user;
+};
+
+ 
+
   // Verify JWT token
   verifyToken(token) {
     try {
+      
       return jwt.verify(token, process.env.JWT_SECRET);
     } catch (error) {
       return null;
@@ -1620,5 +1637,7 @@ canReviewItem = async (req, res) => {
   }
 };
 }
+
+
 
 module.exports = new UserController();
