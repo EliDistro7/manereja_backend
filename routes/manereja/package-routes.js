@@ -1,7 +1,9 @@
 const express = require('express');
 const router  = express.Router();
 const { Package, UserPackageSubscription } = require('../../models/manereja/package');
-const User = require('../../models/manereja/user');
+const User                    = require('../../models/manereja/user');
+const { Agent }               = require('../../models/manereja/agent');
+const { recordPaymentCommission } = require('../../services/commissionService');
 
 // ✅ GET all available packages
 router.get('/packages', async (req, res) => {
@@ -65,8 +67,7 @@ router.get('/users/:userId/has-package/:packageType', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SUBSCRIBE user to a package
-// POST /users/:userId/subscribe
+// SUBSCRIBE — POST /users/:userId/subscribe
 // Body: { packageId, agentId?, agentName?, isTrial? }
 //
 // Trial guard:
@@ -83,8 +84,6 @@ router.post('/users/:userId/subscribe', async (req, res) => {
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
-
-    
 
     // ── 2. Block trial re-use ───────────────────────────────────────────
     if (isTrial && user.hasUsedTrial) {
@@ -103,71 +102,92 @@ router.post('/users/:userId/subscribe', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Package not found' });
     }
 
-  // ── 4. Block duplicate active subscription ──────────────────────────
-const existingSubscription = await UserPackageSubscription.findOne({
-  userId: req.params.userId,
-  packageId,
-  status: { $in: ['active', 'trial'] },
-  expiryDate: { $gt: new Date() },
-});
-if (existingSubscription) {
-  await existingSubscription.populate('packageId');
-  return res.status(200).json({
-    success: true,
-    message: 'Already subscribed',
-    code: 'ALREADY_SUBSCRIBED',
-    subscription: existingSubscription,   // ← Flutter updates cache from this
-  });
-}
+    // ── 4. Block duplicate active subscription ──────────────────────────
+    const existingSubscription = await UserPackageSubscription.findOne({
+      userId:     req.params.userId,
+      packageId,
+      status:     { $in: ['active', 'trial'] },
+      expiryDate: { $gt: new Date() },
+    });
+    if (existingSubscription) {
+      await existingSubscription.populate('packageId');
+      return res.status(200).json({
+        success:      true,
+        message:      'Already subscribed',
+        code:         'ALREADY_SUBSCRIBED',
+        subscription: existingSubscription,
+      });
+    }
 
     // ── 5. Calculate dates ──────────────────────────────────────────────
     const startDate  = new Date();
     const expiryDate = new Date();
     if (isTrial) {
-      expiryDate.setDate(expiryDate.getDate() + 7); // 7-day trial
+      expiryDate.setDate(expiryDate.getDate() + 7);       // 7-day trial
     } else {
-      expiryDate.setMonth(expiryDate.getMonth() + 1); // 1-month paid
+      expiryDate.setMonth(expiryDate.getMonth() + 1);     // 1-month paid
     }
 
-    // ── 6. Create subscription ──────────────────────────────────────────
-   // ── 6. Create subscription ──────────────────────────────────────────
-const subscription = new UserPackageSubscription({
-  userId:    req.params.userId,
-  packageId,
-  status:    isTrial ? 'trial' : 'active',
-  startDate,
-  expiryDate,
-  isTrial,
-  trialEndDate: isTrial ? expiryDate : null,
-  
-  // ← ADD THESE for paid subscriptions
-  lastPaymentDate:   isTrial ? null : new Date(),
-  lastPaymentAmount: isTrial ? 0 : pkg.price.amount,
-  totalPaid:         isTrial ? 0 : pkg.price.amount,   // ← was always 0
-  
-  acquiredBy: {
-    agentId:             agentId   || null,
-    agentName:           agentName || null,
-    commissionRate:      0.30,
-    totalCommissionPaid: 0,
-  },
-});
+    // ── 6. Resolve agent — read commissionRate from Agent document ──────
+    let acquiredBy = {
+      agentId:             null,
+      agentName:           null,
+      commissionRate:      0.10,
+      totalCommissionPaid: 0,
+      assignedAt:          null,
+    };
+
+    if (agentId) {
+      const agent = await Agent.findOne({ _id: agentId, isActive: true });
+      if (agent) {
+        acquiredBy = {
+          agentId:             agent._id,
+          agentName:           agent.name,
+          commissionRate:      agent.commissionRate ?? 0.10,
+          totalCommissionPaid: 0,
+          assignedAt:          new Date(),
+        };
+        await Agent.findByIdAndUpdate(agent._id, { $inc: { totalReferrals: 1 } });
+        console.log(`🤝 Linked to agent: ${agent.name} (rate: ${agent.commissionRate})`);
+      } else {
+        console.warn(`⚠️ Agent ${agentId} not found or inactive — no agent linked`);
+      }
+    }
+
+    // ── 7. Create subscription ──────────────────────────────────────────
+    const subscription = new UserPackageSubscription({
+      userId:    req.params.userId,
+      packageId,
+      status:    isTrial ? 'trial' : 'active',
+      startDate,
+      expiryDate,
+      isTrial,
+      trialEndDate:      isTrial ? expiryDate : null,
+      lastPaymentDate:   isTrial ? null : new Date(),
+      lastPaymentAmount: isTrial ? 0    : pkg.price.amount,
+      totalPaid:         isTrial ? 0    : pkg.price.amount,
+      acquiredBy,
+    });
     await subscription.save();
 
-    // ── 7. Mark trial as used on the user record ────────────────────────
-    //      Done AFTER the subscription is saved so we never mark the flag
-    //      if the subscription creation itself failed.
+    // ── 8. Mark trial used (after save — never mark if save failed) ─────
     if (isTrial) {
       await User.findByIdAndUpdate(req.params.userId, { hasUsedTrial: true });
       console.log(`✅ hasUsedTrial marked for user: ${user._id}`);
     }
 
+    // ── 9. Record commission for immediate paid subscriptions ───────────
+    //      Trials: commission recorded later via confirm-payment endpoint.
+    if (!isTrial && acquiredBy.agentId) {
+      await recordPaymentCommission(subscription, pkg.price.amount);
+    }
+
     await subscription.populate('packageId');
 
-    console.log(`✅ Subscription created for user ${user._id}, trial=${isTrial}`);
+    console.log(`✅ Subscription created: user=${user._id} trial=${isTrial}`);
     return res.status(201).json({
-      success: true,
-      message: isTrial ? 'Trial subscription created' : 'Subscription created',
+      success:     true,
+      message:     isTrial ? 'Trial subscription created' : 'Subscription created',
       subscription,
     });
 
@@ -177,14 +197,82 @@ const subscription = new UserPackageSubscription({
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// CONFIRM PAYMENT — POST /subscriptions/:subscriptionId/confirm-payment
+// Called by admin after verifying a WhatsApp payment screenshot.
+// Body: { paymentAmount, paymentDate? }
+// ═══════════════════════════════════════════════════════════════════════════
+router.post('/subscriptions/:subscriptionId/confirm-payment', async (req, res) => {
+  try {
+    const { paymentAmount, paymentDate } = req.body;
+
+    if (!paymentAmount) {
+      return res.status(400).json({ success: false, message: 'paymentAmount is required' });
+    }
+
+    const subscription = await UserPackageSubscription.findById(req.params.subscriptionId);
+    if (!subscription) {
+      return res.status(404).json({ success: false, message: 'Subscription not found' });
+    }
+
+    const confirmedAt              = paymentDate ? new Date(paymentDate) : new Date();
+    subscription.status            = 'active';
+    subscription.isTrial           = false;
+    subscription.lastPaymentAmount = paymentAmount;
+    subscription.lastPaymentDate   = confirmedAt;
+    subscription.totalPaid         = (subscription.totalPaid || 0) + paymentAmount;
+
+    // Extend expiry 1 month from now
+    const newExpiry = new Date();
+    newExpiry.setMonth(newExpiry.getMonth() + 1);
+    subscription.expiryDate = newExpiry;
+
+    await subscription.save();
+
+    // Record commission in ledger (non-blocking — never breaks payment flow)
+    const commissionEntry = await recordPaymentCommission(subscription, paymentAmount, confirmedAt);
+
+    await subscription.populate('packageId');
+
+    const response = {
+      success:      true,
+      message:      'Payment confirmed and subscription activated',
+      subscription,
+    };
+
+    if (commissionEntry) {
+      response.commission = {
+        agentId:       commissionEntry.agentId,
+        commissionDue: commissionEntry.commissionDue,
+        period:        commissionEntry.period,
+      };
+      console.log(`💰 Commission recorded: TZS ${commissionEntry.commissionDue} | ${commissionEntry.period}`);
+    }
+
+    res.json(response);
+  } catch (error) {
+    console.error('Payment confirmation error:', error);
+    res.status(500).json({ success: false, message: 'Failed to confirm payment' });
+  }
+});
+
 // ✅ RENEW subscription
 router.post('/subscriptions/:subscriptionId/renew', async (req, res) => {
   try {
     const { durationInMonths = 1, paymentAmount } = req.body;
+
     const subscription = await UserPackageSubscription.findById(req.params.subscriptionId);
-    if (!subscription) return res.status(404).json({ success: false, message: 'Subscription not found' });
+    if (!subscription) {
+      return res.status(404).json({ success: false, message: 'Subscription not found' });
+    }
 
     await subscription.renew(durationInMonths, paymentAmount);
+
+    // Record commission for renewal payment
+    if (paymentAmount && subscription.acquiredBy?.agentId) {
+      await recordPaymentCommission(subscription, paymentAmount);
+    }
+
     await subscription.populate('packageId');
     res.json({ success: true, message: 'Subscription renewed successfully', subscription });
   } catch (error) {
@@ -197,7 +285,9 @@ router.post('/subscriptions/:subscriptionId/renew', async (req, res) => {
 router.post('/subscriptions/:subscriptionId/cancel', async (req, res) => {
   try {
     const subscription = await UserPackageSubscription.findById(req.params.subscriptionId);
-    if (!subscription) return res.status(404).json({ success: false, message: 'Subscription not found' });
+    if (!subscription) {
+      return res.status(404).json({ success: false, message: 'Subscription not found' });
+    }
 
     await subscription.cancel();
     await subscription.populate('packageId');
@@ -212,8 +302,11 @@ router.post('/subscriptions/:subscriptionId/cancel', async (req, res) => {
 router.post('/subscriptions/:subscriptionId/upgrade', async (req, res) => {
   try {
     const { paymentAmount } = req.body;
+
     const subscription = await UserPackageSubscription.findById(req.params.subscriptionId);
-    if (!subscription) return res.status(404).json({ success: false, message: 'Subscription not found' });
+    if (!subscription) {
+      return res.status(404).json({ success: false, message: 'Subscription not found' });
+    }
     if (subscription.status !== 'trial') {
       return res.status(400).json({ success: false, message: 'Can only upgrade trial subscriptions' });
     }
@@ -222,17 +315,19 @@ router.post('/subscriptions/:subscriptionId/upgrade', async (req, res) => {
     subscription.isTrial           = false;
     subscription.lastPaymentDate   = new Date();
     subscription.lastPaymentAmount = paymentAmount;
-    subscription.totalPaid         = paymentAmount;
+    subscription.totalPaid         = (subscription.totalPaid || 0) + paymentAmount;
 
     const newExpiry = new Date();
     newExpiry.setMonth(newExpiry.getMonth() + 1);
     subscription.expiryDate = newExpiry;
 
-    if (subscription.acquiredBy.agentId && paymentAmount) {
-      subscription.acquiredBy.totalCommissionPaid += paymentAmount * subscription.acquiredBy.commissionRate;
+    await subscription.save();
+
+    // Record commission via ledger — do NOT mutate totalCommissionPaid directly
+    if (paymentAmount && subscription.acquiredBy?.agentId) {
+      await recordPaymentCommission(subscription, paymentAmount);
     }
 
-    await subscription.save();
     await subscription.populate('packageId');
     res.json({ success: true, message: 'Trial upgraded to paid subscription', subscription });
   } catch (error) {
@@ -245,7 +340,9 @@ router.post('/subscriptions/:subscriptionId/upgrade', async (req, res) => {
 router.post('/subscriptions/:subscriptionId/usage/:featureId', async (req, res) => {
   try {
     const subscription = await UserPackageSubscription.findById(req.params.subscriptionId);
-    if (!subscription) return res.status(404).json({ success: false, message: 'Subscription not found' });
+    if (!subscription) {
+      return res.status(404).json({ success: false, message: 'Subscription not found' });
+    }
     await subscription.recordFeatureUsage(req.params.featureId);
     res.json({ success: true, message: 'Feature usage recorded' });
   } catch (error) {
@@ -267,18 +364,21 @@ router.get('/analytics/subscriptions/stats', async (req, res) => {
     const activeSubs = await UserPackageSubscription
       .find({ status: 'active', expiryDate: { $gt: new Date() } })
       .populate('packageId');
+
     const accountingCount     = activeSubs.filter(s => s.packageId?.packageType === 'accounting').length;
     const taskManagementCount = activeSubs.filter(s => s.packageId?.packageType === 'task_management').length;
-
-    const monthlyRevenue = await UserPackageSubscription.calculateMonthlyRevenue();
+    const monthlyRevenue      = await UserPackageSubscription.calculateMonthlyRevenue();
 
     res.json({
       success: true,
       stats: {
-        active: activeCount, trial: trialCount,
-        expired: expiredCount, cancelled: cancelledCount,
+        active:        activeCount,
+        trial:         trialCount,
+        expired:       expiredCount,
+        cancelled:     cancelledCount,
         byPackageType: { accounting: accountingCount, taskManagement: taskManagementCount },
-        monthlyRevenue, currency: 'TZS',
+        monthlyRevenue,
+        currency:      'TZS',
       },
     });
   } catch (error) {
@@ -298,19 +398,32 @@ router.get('/analytics/revenue/monthly', async (req, res) => {
   }
 });
 
-// ✅ GET agent commissions
 router.get('/agents/:agentId/commissions', async (req, res) => {
   try {
-    const { startDate, endDate } = req.query;
-    const start = startDate ? new Date(startDate) : new Date(new Date().setDate(1));
-    const end   = endDate   ? new Date(endDate)   : new Date();
+    const { startDate, endDate, period } = req.query;
 
-    const commission    = await UserPackageSubscription.calculateAgentCommissions(req.params.agentId, start, end);
+    // Use period if provided, otherwise derive from startDate or default to current month
+    const { getAgentMonthlyLedger } = require('../../services/commissionService');
+    const targetPeriod = period || (startDate
+      ? `${new Date(startDate).getFullYear()}-${String(new Date(startDate).getMonth() + 1).padStart(2, '0')}`
+      : undefined // defaults to current month inside getAgentMonthlyLedger
+    );
+
+    const { entries, totalDue, totalPaid, netOwed } =
+      await getAgentMonthlyLedger(req.params.agentId, targetPeriod);
+
     const subscriptions = await UserPackageSubscription
       .find({ 'acquiredBy.agentId': req.params.agentId, status: 'active' })
       .populate('packageId userId');
 
-    res.json({ success: true, commission, currency: 'TZS', subscriptions, period: { start, end } });
+    res.json({
+      success: true,
+      commission: { totalDue, totalPaid, netOwed },
+      entries,       // full ledger breakdown — each payment event
+      currency: 'TZS',
+      subscriptions,
+      period: targetPeriod,
+    });
   } catch (error) {
     console.error('Error calculating commissions:', error);
     res.status(500).json({ success: false, message: 'Failed to calculate commissions' });

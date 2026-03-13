@@ -91,7 +91,7 @@ app.get('/health', (req, res) => {
 });
 
 // MongoDB Connection
-mongoose.connect(process.env.MONGO_URL, {
+mongoose.connect(process.env.MONGO_URL1, {
     useNewUrlParser: true,
     useUnifiedTopology: true,
     connectTimeoutMS: 20000,
@@ -101,7 +101,7 @@ mongoose.connect(process.env.MONGO_URL, {
     console.log("Connected to MongoDB");
    //
    // TanzaniaSeed.seedTanzaniaLocations();
-  // PackagesSeed.seedPackages();
+//PackagesSeed.seedPackages();
     //seedAdmin();
 })
 .catch((err) => {
@@ -112,11 +112,12 @@ mongoose.connect(process.env.MONGO_URL, {
 const io = initSocket(server);
 
 // Routes
+app.use('/auth/agents', agentsRouter);
 app.use('/', packageRoutes);
 app.use('/locations', locationRoutes);
 app.use('/', userRoutes);
 app.use('/', serviceRoutes);
-app.use('/auth/agents', agentsRouter);
+
 
 app.use('/auth', adminRoutes);
 app.use('/sync', syncRoutes);

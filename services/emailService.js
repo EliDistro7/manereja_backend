@@ -25,7 +25,10 @@ transporter.verify((error) => {
 // ─────────────────────────────────────────────
 // Base HTML wrapper (shared branding)
 // ─────────────────────────────────────────────
+
+
 const LOGO_URL = 'https://res.cloudinary.com/dh3bzuzyb/image/upload/v1772730584/manereja_hvqr57.png';
+
 
 function baseTemplate(title, bodyHtml) {
   return `

@@ -20,7 +20,7 @@ async function seedPackages() {
       packageType: 'accounting',
 
       price: {
-        amount: 15000,
+        amount: 10000,
         currency: 'TZS',
         billingCycle: 'monthly'
       },
@@ -61,7 +61,7 @@ async function seedPackages() {
       packageType: 'task_management',
 
       price: {
-        amount: 15000,
+        amount: 10000,
         currency: 'TZS',
         billingCycle: 'monthly'
       },
@@ -94,7 +94,7 @@ const bundlePackage = new Package({
   packageType: 'bundle',
 
   price: {
-    amount: 25000,   // saves 5,000 vs buying both separately (30,000)
+    amount: 20000,   // saves 5,000 vs buying both separately (30,000)
     currency: 'TZS',
     billingCycle: 'monthly'
   },
