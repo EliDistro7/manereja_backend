@@ -91,7 +91,7 @@ app.get('/health', (req, res) => {
 });
 
 // MongoDB Connection
-mongoose.connect(process.env.MONGO_URL1, {
+mongoose.connect(process.env.MONGO_URL, {
     useNewUrlParser: true,
     useUnifiedTopology: true,
     connectTimeoutMS: 20000,
