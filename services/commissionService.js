@@ -10,6 +10,8 @@
 // only new docs added. Each doc = one payment event.
 // Mark-paid is done via the route POST /auth/agents/commission/mark-paid.
 
+const { Agent, CommissionLedger } = require('../models/manereja/agent');
+
 const mongoose = require('mongoose');
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -17,26 +19,7 @@ const mongoose = require('mongoose');
 // ─────────────────────────────────────────────────────────────────────────────
 // Add this to models/manereja/agent.js  (or its own file)
 
-const CommissionLedgerSchema = new mongoose.Schema({
-  agentId:        { type: mongoose.Schema.Types.ObjectId, ref: 'Agent', required: true, index: true },
-  subscriptionId: { type: mongoose.Schema.Types.ObjectId, required: true },
-  userId:         { type: mongoose.Schema.Types.ObjectId, required: true },
-  packageId:      { type: mongoose.Schema.Types.ObjectId, required: true },
 
-  paymentAmount:  { type: Number, required: true },   // full subscription amount
-  commissionRate: { type: Number, required: true },   // snapshot of rate at time of payment
-  commissionDue:  { type: Number, required: true },   // paymentAmount * commissionRate
-
-  period:         { type: String, required: true },   // "YYYY-MM" — month to settle in
-  isPaid:         { type: Boolean, default: false, index: true },
-  paidAt:         { type: Date,   default: null },
-  paidBatchId:    { type: String, default: null },    // for grouping mark-paid runs
-
-  notes:          { type: String, default: null },
-}, { timestamps: true });
-
-const CommissionLedger = mongoose.models.CommissionLedger
-  || mongoose.model('CommissionLedger', CommissionLedgerSchema);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: format a Date to "YYYY-MM"

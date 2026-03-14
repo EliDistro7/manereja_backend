@@ -256,7 +256,6 @@ router.post('/subscriptions/:subscriptionId/confirm-payment', async (req, res) =
   }
 });
 
-// ✅ RENEW subscription
 router.post('/subscriptions/:subscriptionId/renew', async (req, res) => {
   try {
     const { durationInMonths = 1, paymentAmount } = req.body;
@@ -268,8 +267,32 @@ router.post('/subscriptions/:subscriptionId/renew', async (req, res) => {
 
     await subscription.renew(durationInMonths, paymentAmount);
 
-    // Record commission for renewal payment
-    if (paymentAmount && subscription.acquiredBy?.agentId) {
+    // ── Same agent fallback ────────────────────────────────────────────────
+    let agentId = subscription.acquiredBy?.agentId;
+
+    if (!agentId && subscription.userId) {
+      const { Agent } = require('../../models/manereja/agent');
+      const allSubs = await UserPackageSubscription.find({
+        userId: subscription.userId,
+        'acquiredBy.agentId': { $ne: null },
+      }).lean();
+      agentId = allSubs[0]?.acquiredBy?.agentId || null;
+
+      if (agentId) {
+        const agent = await Agent.findById(agentId).lean();
+        subscription.acquiredBy = {
+          agentId:             agent._id,
+          agentName:           agent.name,
+          commissionRate:      agent.commissionRate ?? 0.10,
+          totalCommissionPaid: subscription.acquiredBy?.totalCommissionPaid || 0,
+          assignedAt:          subscription.acquiredBy?.assignedAt || new Date(),
+        };
+        await subscription.save();
+        console.log(`🔁 Agent patched on renew: ${agent.name}`);
+      }
+    }
+
+    if (paymentAmount && agentId) {
       await recordPaymentCommission(subscription, paymentAmount);
     }
 
@@ -299,6 +322,7 @@ router.post('/subscriptions/:subscriptionId/cancel', async (req, res) => {
 });
 
 // ✅ UPGRADE from trial to paid
+// ✅ UPGRADE from trial to paid
 router.post('/subscriptions/:subscriptionId/upgrade', async (req, res) => {
   try {
     const { paymentAmount } = req.body;
@@ -323,9 +347,39 @@ router.post('/subscriptions/:subscriptionId/upgrade', async (req, res) => {
 
     await subscription.save();
 
-    // Record commission via ledger — do NOT mutate totalCommissionPaid directly
-    if (paymentAmount && subscription.acquiredBy?.agentId) {
+    // ── Commission — with backward lookup fallback ─────────────────────────
+    console.log('🔍 upgrade acquiredBy:', JSON.stringify(subscription.acquiredBy));
+
+    let agentId = subscription.acquiredBy?.agentId;
+
+    // Fallback: if agentId missing on sub, search by userId on Agent subscriptions
+    if (!agentId && subscription.userId) {
+      const { Agent } = require('../../models/manereja/agent');
+      const allSubs = await UserPackageSubscription.find({
+        userId: subscription.userId,
+        'acquiredBy.agentId': { $ne: null },
+      }).lean();
+      agentId = allSubs[0]?.acquiredBy?.agentId || null;
+
+      if (agentId) {
+        // Patch the subscription so future renewals work too
+        const agent = await Agent.findById(agentId).lean();
+        subscription.acquiredBy = {
+          agentId:             agent._id,
+          agentName:           agent.name,
+          commissionRate:      agent.commissionRate ?? 0.10,
+          totalCommissionPaid: 0,
+          assignedAt:          subscription.acquiredBy?.assignedAt || new Date(),
+        };
+        await subscription.save();
+        console.log(`🔁 Agent patched onto subscription from other sub: ${agent.name}`);
+      }
+    }
+
+    if (paymentAmount && agentId) {
       await recordPaymentCommission(subscription, paymentAmount);
+    } else {
+      console.log('⚠️ No agentId — commission skipped');
     }
 
     await subscription.populate('packageId');
