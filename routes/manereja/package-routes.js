@@ -5,6 +5,13 @@ const User                    = require('../../models/manereja/user');
 const { Agent }               = require('../../models/manereja/agent');
 const { recordPaymentCommission } = require('../../services/commissionService');
 
+const {
+  screensForPackages,
+  annotatePermissionsWithAccess,
+} = require('../../utils/screenPackageMap');
+ 
+const BusinessProfile = require('../../models/manereja/business-profile');
+
 // ✅ GET all available packages
 router.get('/packages', async (req, res) => {
   try {
@@ -28,11 +35,42 @@ router.get('/packages/:packageId', async (req, res) => {
   }
 });
 
-// ✅ GET user's active subscriptions
+
+// ✅ GET user's active subscriptions — enriched with screen access
 router.get('/users/:userId/subscriptions', async (req, res) => {
   try {
     const subscriptions = await UserPackageSubscription.getActivePackages(req.params.userId);
-    res.json({ success: true, subscriptions, count: subscriptions.length });
+ 
+    // ── Derive active package types ─────────────────────────────────────────
+    const activePackageTypes = subscriptions
+      .map(s => s.packageId?.packageType)
+      .filter(Boolean);
+ 
+    // ── Which screens are unlocked by these packages ────────────────────────
+    const unlockedScreens = screensForPackages(activePackageTypes);
+ 
+    // ── Annotate the user's active profile's screen permissions ────────────
+    // (optional — only if profileId query param is provided)
+    let annotatedPermissions = null;
+    const profileId = req.query.profileId;
+    if (profileId) {
+      const profile = await BusinessProfile.findById(profileId).lean();
+      if (profile?.screenPermissions) {
+        annotatedPermissions = annotatePermissionsWithAccess(
+          profile.screenPermissions,
+          activePackageTypes,
+        );
+      }
+    }
+ 
+    res.json({
+      success:              true,
+      subscriptions,
+      count:                subscriptions.length,
+      activePackageTypes,   // ['accounting'] | ['task_management'] | ['bundle'] | []
+      unlockedScreens,      // ['income', 'expenses', 'cashFlow', ...]
+      annotatedPermissions, // null unless ?profileId= was passed
+    });
   } catch (error) {
     console.error('Error fetching subscriptions:', error);
     res.status(500).json({ success: false, message: 'Failed to fetch subscriptions' });
