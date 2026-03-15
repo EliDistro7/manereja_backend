@@ -230,7 +230,7 @@ function getDefaultScreenPermissions() {
     }],
     ['analytics', {
       screen: 'analytics',
-      isLocked: true,
+      isLocked: false,
       allowedRoles: ['owner', 'admin'],
       displayName: 'Analytics & Reports',
       description: 'View detailed analytics and financial reports',
@@ -242,7 +242,7 @@ function getDefaultScreenPermissions() {
     // ═══════════════════════════════════════════════════════════
     ['inventory', {
       screen: 'inventory',
-      isLocked: true,
+      isLocked: false,
       allowedRoles: ['owner', 'admin'],
       displayName: 'Inventory/Stock',
       description: 'Manage inventory and stock levels',
@@ -275,7 +275,7 @@ function getDefaultScreenPermissions() {
     ['workplaceSettings', {
       screen: 'workplaceSettings',
       isLocked: true,
-      allowedRoles: ['owner'],
+      allowedRoles: ['owner','admin'],
       displayName: 'Workplace Settings',
       description: 'Configure workplace location and rules',
       category: 'Inventory & Operations'
@@ -505,47 +505,34 @@ BusinessProfileSchema.methods.canUserEdit = function(userId) {
   return ['owner', 'admin', 'editor'].includes(role);
 };
 
-// Method to check if user can access a specific screen
 BusinessProfileSchema.methods.canAccessScreen = function(userId, screenName) {
   const userIdStr = userId.toString();
-  
-  // Owner can access everything
   if (this.ownerId.toString() === userIdStr) return true;
-  
-  // Get user's role
+
   const member = this.members.get(userIdStr);
   if (!member) return false;
-  
-  // Get screen permission
+
   const permission = this.screenPermissions.get(screenName);
   if (!permission) return false;
-  
-  // If locked, only owner can access
-  if (permission.isLocked) return false;
-  
-  // Check if role is in allowed roles
+
   return permission.allowedRoles.includes(member.role);
 };
 
-// Method to get all accessible screens for a user
 BusinessProfileSchema.methods.getAccessibleScreens = function(userId) {
   const userIdStr = userId.toString();
-  
-  // Owner can access all screens
   if (this.ownerId.toString() === userIdStr) {
     return Array.from(this.screenPermissions.keys());
   }
-  
+
   const member = this.members.get(userIdStr);
   if (!member) return [];
-  
+
   const accessible = [];
   this.screenPermissions.forEach((permission, screenName) => {
-    if (!permission.isLocked && permission.allowedRoles.includes(member.role)) {
+    if (permission.allowedRoles.includes(member.role)) {
       accessible.push(screenName);
     }
   });
-  
   return accessible;
 };
 
@@ -724,6 +711,9 @@ BusinessProfileSchema.methods.toJSON = function() {
   
   return obj;
 };
+
+
+
 
 // Enable virtuals in JSON
 BusinessProfileSchema.set('toJSON', { virtuals: true });
