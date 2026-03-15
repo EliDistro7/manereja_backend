@@ -361,72 +361,43 @@ router.post('/subscriptions/:subscriptionId/cancel', async (req, res) => {
 
 // ✅ UPGRADE from trial to paid
 // ✅ UPGRADE from trial to paid
-router.post('/subscriptions/:subscriptionId/upgrade', async (req, res) => {
-  try {
-    const { paymentAmount } = req.body;
 
+
+router.post('/subscriptions/:subscriptionId/cancel', async (req, res) => {
+  try {
     const subscription = await UserPackageSubscription.findById(req.params.subscriptionId);
     if (!subscription) {
       return res.status(404).json({ success: false, message: 'Subscription not found' });
     }
-    if (subscription.status !== 'trial') {
-      return res.status(400).json({ success: false, message: 'Can only upgrade trial subscriptions' });
-    }
 
-    subscription.status            = 'active';
-    subscription.isTrial           = false;
-    subscription.lastPaymentDate   = new Date();
-    subscription.lastPaymentAmount = paymentAmount;
-    subscription.totalPaid         = (subscription.totalPaid || 0) + paymentAmount;
+    await subscription.cancel();
 
-    const newExpiry = new Date();
-    newExpiry.setMonth(newExpiry.getMonth() + 1);
-    subscription.expiryDate = newExpiry;
+    // ── Force-expire on the user side too ──────────────────────────────
+    // Check if user has ANY other active subscriptions
+    const otherActive = await UserPackageSubscription.findOne({
+      userId:     subscription.userId,
+      _id:        { $ne: subscription._id },
+      status:     { $in: ['active', 'trial'] },
+      expiryDate: { $gt: new Date() },
+    });
 
-    await subscription.save();
-
-    // ── Commission — with backward lookup fallback ─────────────────────────
-    console.log('🔍 upgrade acquiredBy:', JSON.stringify(subscription.acquiredBy));
-
-    let agentId = subscription.acquiredBy?.agentId;
-
-    // Fallback: if agentId missing on sub, search by userId on Agent subscriptions
-    if (!agentId && subscription.userId) {
-      const { Agent } = require('../../models/manereja/agent');
-      const allSubs = await UserPackageSubscription.find({
-        userId: subscription.userId,
-        'acquiredBy.agentId': { $ne: null },
-      }).lean();
-      agentId = allSubs[0]?.acquiredBy?.agentId || null;
-
-      if (agentId) {
-        // Patch the subscription so future renewals work too
-        const agent = await Agent.findById(agentId).lean();
-        subscription.acquiredBy = {
-          agentId:             agent._id,
-          agentName:           agent.name,
-          commissionRate:      agent.commissionRate ?? 0.10,
-          totalCommissionPaid: 0,
-          assignedAt:          subscription.acquiredBy?.assignedAt || new Date(),
-        };
-        await subscription.save();
-        console.log(`🔁 Agent patched onto subscription from other sub: ${agent.name}`);
-      }
-    }
-
-    if (paymentAmount && agentId) {
-      await recordPaymentCommission(subscription, paymentAmount);
-    } else {
-      console.log('⚠️ No agentId — commission skipped');
+    if (!otherActive) {
+      // No other active subs — revoke access on the user document
+      await User.findByIdAndUpdate(subscription.userId, {
+        hasActiveAccess:   false,
+        subscriptionType:  'free',
+      });
+      console.log(`🔒 Access revoked for user ${subscription.userId}`);
     }
 
     await subscription.populate('packageId');
-    res.json({ success: true, message: 'Trial upgraded to paid subscription', subscription });
+    res.json({ success: true, message: 'Subscription cancelled successfully', subscription });
   } catch (error) {
-    console.error('Error upgrading subscription:', error);
-    res.status(500).json({ success: false, message: 'Failed to upgrade subscription' });
+    console.error('Error cancelling subscription:', error);
+    res.status(500).json({ success: false, message: 'Failed to cancel subscription' });
   }
 });
+
 
 // ✅ RECORD feature usage
 router.post('/subscriptions/:subscriptionId/usage/:featureId', async (req, res) => {
