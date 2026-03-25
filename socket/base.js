@@ -8,8 +8,7 @@ const CashflowEvents = require('./events/CashflowEvents.js');
 const taskerReportingEvents = require('./events/taskerReportingEvents.js');
 const taskerReportSubmissionEvents = require('./events/taskerSubmissionEvents.js');
 const profileSyncEvents = require('./events/profileSyncEvents.js');
-const packageNotificationService  = require('./events/packageNotificationService.js');
-
+const packageNotificationService = require('./events/packageNotificationService.js');
 
 const User = require('../models/manereja/user.js');
 
@@ -136,6 +135,21 @@ function initSocket(server) {
   io.on('connection', (socket) => {
     console.log('socket connected:', socket.id);
 
+    // ── Register all feature event handlers first so they're ready
+    //    before any client event arrives on this socket.
+    // ─────────────────────────────────────────────────────────────
+    messageEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
+    taskerReportSubmissionEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
+    profileSyncEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
+    orderEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
+    taskerEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
+    taskerReportingEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
+    NotificationsEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
+    CashflowEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
+    // Note: packageNotificationService is a service, not a socket event module.
+    // Call it only if it expects to be invoked per-connection.
+    // packageNotificationService(io, socket, userSockets, roomSocketsMap, socketToUser);
+
     // ── Guest users ───────────────────────────────────────────────────────
     socket.on('guestUser', () => {
       guestUsers.push(socket.id);
@@ -152,6 +166,8 @@ function initSocket(server) {
 
         _addUserSocket(userId, socket.id);
 
+        console.log('📊 Current user state:',userDetails);
+
         const userWithSocket = {
           ...userDetails._doc,
           socketId: socket.id,
@@ -164,9 +180,15 @@ function initSocket(server) {
         }
 
         // Notify this user's conversations about their online status
-_emitToUser(userId, 'user_online', { userId });
+        _emitToUser(userId, 'user_online', { userId });
 
-    
+        // ── Flush pending state on reconnect ──────────────────────────────
+        // Emit connection_ready so feature modules (report submissions, etc.)
+        // can push any events this user missed while they were offline.
+        // This is handled by the connection_ready listener registered above
+        // inside taskerReportSubmissionEvents.
+        socket.emit('connection_ready', { userId });
+
       } catch (error) {
         console.error('Error fetching user details:', error);
         socket.emit('loginUserAck', {
@@ -248,17 +270,6 @@ _emitToUser(userId, 'user_online', { userId });
       socket.emit('liveGroupsResponse', { liveGroupsNow: liveRoomsMap });
     });
 
-    // ── Feature event handlers ────────────────────────────────────────────
-    // socketToUser is passed so event modules can do O(1) userId lookups
-    messageEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
-    taskerReportSubmissionEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
-    profileSyncEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
-    orderEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
-    taskerEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
-    taskerReportingEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
-    NotificationsEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
-    CashflowEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
-
     // ── Single, authoritative disconnect handler ──────────────────────────
     socket.on('disconnect', () => {
       console.log(`🔌 Socket disconnected: ${socket.id}`);
@@ -271,7 +282,6 @@ _emitToUser(userId, 'user_online', { userId });
         if (!userSockets[userId]) {
           const idx = onlineUsers.findIndex(u => u._id?.toString() === userId);
           if (idx !== -1) onlineUsers.splice(idx, 1);
-       
 
           io.emit('user_offline', { userId });
         } else {

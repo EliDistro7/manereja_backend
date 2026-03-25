@@ -1298,10 +1298,15 @@ socket.on('update_task', async ({ taskId, updates, userId }) => {
     }
   }
 
-  async function isOwnerOrAdmin(profile, userId) {
+async function isOwnerOrAdmin(profile, userId) {
   if (!profile) return false;
-  if (profile.ownerId.toString() === userId) return true;
-  const member = profile.members?.[userId];
+  if (profile.ownerId.toString() === userId.toString()) return true;
+
+  // profile.members is a Mongoose Map — must use .get(), not bracket notation
+  const member = profile.members instanceof Map
+    ? profile.members.get(userId.toString())
+    : (profile.members || {})[userId.toString()];
+
   return member?.role === 'admin';
 }
 

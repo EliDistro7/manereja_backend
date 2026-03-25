@@ -1,5 +1,3 @@
-// socket/events/taskerReportSubmissionEvents.js
-
 const ReportTemplate = require('../../models/manereja/report-template.js');
 const ReportSubmission = require('../../models/manereja/report-submission.js');
 const Task = require('../../models/manereja/task.js');
@@ -12,25 +10,36 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
   // HELPER FUNCTIONS
   // ==========================================
 
-  /** Emit to ALL active sockets of a user (multi-tab safe) */
   function emitToUser(userId, event, data) {
     const sockets = userSockets[userId];
-    if (!sockets || sockets.size === 0) return;
+    if (!sockets || sockets.size === 0) return false;
     for (const socketId of sockets) {
       io.to(socketId).emit(event, data);
     }
+    return true;
   }
 
-  /** Check if userId is owner OR admin of a profile */
   async function isOwnerOrAdmin(profile, userId) {
     if (!profile) return false;
-    if (profile.ownerId.toString() === userId) return true;
-    const members = profile.members || {};
-    const member = members[userId];
+    if (profile.ownerId.toString() === userId.toString()) return true;
+    const member = profile.members instanceof Map
+      ? profile.members.get(userId.toString())
+      : (profile.members || {})[userId.toString()];
     return member?.role === 'admin';
   }
 
-  /** Broadcast an event to all members of a project */
+  async function emitSubmissionUpsertToPrivileged(profile, event, payload) {
+    emitToUser(profile.ownerId.toString(), event, payload);
+    const members = profile.members instanceof Map
+      ? Object.fromEntries(profile.members)
+      : (profile.members || {});
+    for (const [memberId, member] of Object.entries(members)) {
+      if (member.role === 'admin' && memberId !== profile.ownerId.toString()) {
+        emitToUser(memberId, event, payload);
+      }
+    }
+  }
+
   async function broadcastToProject(project, event, data) {
     const userIds = [
       project.createdBy.toString(),
@@ -39,6 +48,48 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
     ];
     for (const uid of [...new Set(userIds)]) {
       emitToUser(uid, event, data);
+    }
+  }
+
+  // ==========================================
+  // SHARED EMIT HELPER
+  // Builds profileMap in one DB query and emits report_submissions_list.
+  // Used by connection_ready, get_report_submissions, and any future
+  // path that sends a full submissions list to a client.
+  // ==========================================
+  async function emitSubmissionsList({ target, isSocket, submissions, managedProfileIds }) {
+    // One DB query for all unique profiles represented in this batch
+    const uniqueProfileIds = [...new Set(
+      submissions.map(s => s.businessProfileId.toString())
+    )];
+
+    const profiles = await BusinessProfile.find({
+      _id: { $in: uniqueProfileIds },
+      isDeleted: false,
+    }).select('_id name icon color');
+
+    const profileMap = {};
+    for (const p of profiles) {
+      profileMap[p._id.toString()] = {
+        id: p._id.toString(),
+        name: p.name,
+        icon: p.icon || null,
+        color: p.color || null,
+      };
+    }
+
+    const payload = {
+      submissions: submissions.map(s => formatReportSubmission(s)),
+      managedProfileIds,
+      profileMap,
+    };
+
+    if (isSocket) {
+      // target is a socket object
+      target.emit('report_submissions_list', payload);
+    } else {
+      // target is a userId string — emit to all their sockets
+      emitToUser(target, 'report_submissions_list', payload);
     }
   }
 
@@ -90,11 +141,9 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
 
   function formatTask(task) {
     const metadata = task.metadata ? Object.fromEntries(task.metadata) : {};
-
     const assignedToIds = (task.assignedTo || []).map(a =>
       a && typeof a === 'object' && a._id ? a._id.toString() : a.toString()
     );
-
     return {
       _id: task._id.toString(),
       id: task._id.toString(),
@@ -106,6 +155,69 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
       metadata,
     };
   }
+
+  // ==========================================
+  // RECONNECT — flush pending submissions
+  // ==========================================
+  socket.on('connection_ready', async ({ userId }) => {
+    try {
+      if (!userId) return;
+      console.log(`📬 connection_ready: flushing pending submissions for ${userId}`);
+
+      const managedProfiles = await BusinessProfile.find({
+        $or: [
+          { ownerId: userId },
+          { [`members.${userId}.role`]: 'admin' },
+        ],
+        isDeleted: false,
+      }).select('_id ownerId members');
+
+      if (managedProfiles.length > 0) {
+        const profileIds = managedProfiles.map(p => p._id);
+        const managedProfileIds = profileIds.map(id => id.toString());
+
+        const pendingSubmissions = await ReportSubmission.find({
+          businessProfileId: { $in: profileIds },
+          status: 'submitted',
+          isDeleted: false,
+        })
+          .populate('submittedBy', 'name email profilePicture')
+          .populate('reviewedBy', 'name email')
+          .sort({ submissionDate: -1, createdAt: -1 });
+
+        if (pendingSubmissions.length > 0) {
+          console.log(`📬 Flushing ${pendingSubmissions.length} pending submission(s) to owner/admin ${userId}`);
+          await emitSubmissionsList({
+            target: userId,
+            isSocket: false,
+            submissions: pendingSubmissions,
+            managedProfileIds,
+          });
+        }
+      } else {
+        // Regular employee — flush their own submissions
+        const mySubmissions = await ReportSubmission.find({
+          submittedBy: userId,
+          isDeleted: false,
+        })
+          .populate('submittedBy', 'name email profilePicture')
+          .populate('reviewedBy', 'name email')
+          .sort({ submissionDate: -1, createdAt: -1 })
+          .limit(50);
+
+        if (mySubmissions.length > 0) {
+          await emitSubmissionsList({
+            target: userId,
+            isSocket: false,
+            submissions: mySubmissions,
+            managedProfileIds: [],
+          });
+        }
+      }
+    } catch (error) {
+      console.error('❌ Error in connection_ready flush:', error);
+    }
+  });
 
   // ==========================================
   // CREATE REPORT TEMPLATE (Owner / Admin only)
@@ -131,7 +243,6 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
       });
 
       await template.save();
-
       const formatted = formatReportTemplate(template);
 
       socket.emit('report_template_created', { success: true, template: formatted });
@@ -143,6 +254,7 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
         });
       }
 
+      console.log('✅ Report template created:', template._id.toString());
     } catch (error) {
       console.error('❌ Error creating report template:', error);
       socket.emit('tasker_error', { error: 'Failed to create report template', details: error.message });
@@ -154,6 +266,10 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
   // ==========================================
   socket.on('get_report_templates', async ({ projectId, userId }) => {
     try {
+      if (!projectId || projectId.toString().trim() === '') {
+        socket.emit('tasker_error', { error: 'projectId is required' });
+        return;
+      }
       const templates = await ReportTemplate.find({ projectId, isDeleted: false })
         .sort({ createdAt: -1 });
 
@@ -225,7 +341,6 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
         updateType: 'template_attached',
       });
 
-      // Notify all assignees
       for (const assignee of task.assignedTo) {
         const assigneeId = assignee._id?.toString() || assignee.toString();
         emitToUser(assigneeId, 'report_template_attached_to_your_task', {
@@ -233,7 +348,6 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
           template: formatReportTemplate(template),
         });
       }
-
     } catch (error) {
       console.error('❌ Error attaching report template:', error);
       socket.emit('tasker_error', { error: 'Failed to attach report template', details: error.message });
@@ -265,12 +379,10 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
       if (submissionId) {
         submission = await ReportSubmission.findById(submissionId);
         if (!submission) { socket.emit('tasker_error', { error: 'Submission not found' }); return; }
-
         if (submission.status !== 'draft' && submission.status !== 'rejected') {
           socket.emit('tasker_error', { error: 'Cannot edit submitted or approved reports' });
           return;
         }
-
         submission.rows = rows;
         submission.updatedAt = new Date();
         if (!isDraft) {
@@ -278,7 +390,6 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
           submission.submittedAt = new Date();
         }
         await submission.save();
-
       } else {
         submission = new ReportSubmission({
           templateId, taskId,
@@ -306,25 +417,15 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
         const profile = await BusinessProfile.findById(project.businessProfileId);
         if (!profile) return;
 
-        emitToUser(profile.ownerId.toString(), 'report_submission_received', {
+        const payload = {
           submission: formatReportSubmission(submission),
           task: formatTask(task),
           template: formatReportTemplate(template),
-        });
+        };
 
-        // Push updated submissions list to owner
-        const updatedSubmissions = await ReportSubmission.find({
-          projectId: task.projectId, isDeleted: false,
-        })
-          .populate('submittedBy', 'name email profilePicture')
-          .populate('reviewedBy', 'name email')
-          .sort({ submissionDate: -1, createdAt: -1 });
-
-        emitToUser(profile.ownerId.toString(), 'report_submissions_list', {
-          submissions: updatedSubmissions.map(s => formatReportSubmission(s)),
-        });
+        await emitSubmissionUpsertToPrivileged(profile, 'report_submission_received', payload);
+        console.log(`📤 Submission ${submission._id} notified to owner/admins of profile ${profile._id}`);
       }
-
     } catch (error) {
       console.error('❌ Error saving report submission:', error);
       socket.emit('tasker_error', { error: 'Failed to save report submission', details: error.message });
@@ -333,7 +434,7 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
 
   // ==========================================
   // GET REPORT SUBMISSIONS
-  // Owner/Admin sees ALL; employees see only their own
+  // Owner/Admin sees ALL across managed profiles; employees see only their own
   // ==========================================
   socket.on('get_report_submissions', async ({
     taskId, projectId, templateId, employeeId,
@@ -352,13 +453,15 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
         if (endDate) query.submissionDate.$lte = new Date(endDate);
       }
 
-      // Determine ownership
       let isPrivileged = false;
+      let managedProfileIds = [];
+
       if (projectId) {
         const project = await Project.findById(projectId);
         if (project) {
           const profile = await BusinessProfile.findById(project.businessProfileId);
           isPrivileged = profile && (await isOwnerOrAdmin(profile, userId));
+          if (isPrivileged) managedProfileIds = [project.businessProfileId.toString()];
         }
       } else if (taskId) {
         const task = await Task.findById(taskId);
@@ -367,7 +470,23 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
           if (project) {
             const profile = await BusinessProfile.findById(project.businessProfileId);
             isPrivileged = profile && (await isOwnerOrAdmin(profile, userId));
+            if (isPrivileged) managedProfileIds = [project.businessProfileId.toString()];
           }
+        }
+      } else {
+        // Badge fetch — scope to ALL profiles this user manages
+        const allManaged = await BusinessProfile.find({
+          $or: [
+            { ownerId: userId },
+            { [`members.${userId}.role`]: 'admin' },
+          ],
+          isDeleted: false,
+        }).select('_id');
+
+        if (allManaged.length > 0) {
+          isPrivileged = true;
+          managedProfileIds = allManaged.map(p => p._id.toString());
+          query.businessProfileId = { $in: allManaged.map(p => p._id) };
         }
       }
 
@@ -386,8 +505,12 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
         .populate('reviewedBy', 'name email')
         .sort({ submissionDate: -1, createdAt: -1 });
 
-      socket.emit('report_submissions_list', {
-        submissions: submissions.map(s => formatReportSubmission(s)),
+      // ✅ Use shared helper — includes profileMap for company name display
+      await emitSubmissionsList({
+        target: socket,
+        isSocket: true,
+        submissions,
+        managedProfileIds,
       });
 
     } catch (error) {
@@ -414,30 +537,21 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
       await submission.populate('submittedBy', 'name email profilePicture');
       await submission.populate('reviewedBy', 'name email');
 
-      socket.emit('report_submission_approved', {
+      const formattedSubmission = formatReportSubmission(submission);
+
+      socket.emit('report_submission_approved', { success: true, submission: formattedSubmission });
+
+      await emitSubmissionUpsertToPrivileged(profile, 'report_submission_approved', {
         success: true,
-        submission: formatReportSubmission(submission),
+        submission: formattedSubmission,
       });
 
-      // Push updated submissions list back to the reviewer
-      const updatedSubmissions = await ReportSubmission.find({
-        projectId: submission.projectId, isDeleted: false,
-      })
-        .populate('submittedBy', 'name email profilePicture')
-        .populate('reviewedBy', 'name email')
-        .sort({ submissionDate: -1, createdAt: -1 });
-
-      socket.emit('report_submissions_list', {
-        submissions: updatedSubmissions.map(s => formatReportSubmission(s)),
-      });
-
-      // Notify the employee
-      emitToUser(submission.submittedBy._id.toString(), 'your_report_submission_approved', {
-        submission: formatReportSubmission(submission),
+      const submittedById = submission.submittedBy._id?.toString() || submission.submittedBy.toString();
+      emitToUser(submittedById, 'your_report_submission_approved', {
+        submission: formattedSubmission,
         reviewNotes,
       });
 
-      // Broadcast task update
       const task = await Task.findById(submission.taskId)
         .populate('assignedTo', 'name email profilePicture')
         .populate('createdBy', 'name email');
@@ -451,6 +565,7 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
         });
       }
 
+      console.log(`✅ Submission ${submissionId} approved by ${userId}`);
     } catch (error) {
       console.error('❌ Error approving report submission:', error);
       socket.emit('tasker_error', { error: 'Failed to approve report submission' });
@@ -475,29 +590,22 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
       await submission.populate('submittedBy', 'name email profilePicture');
       await submission.populate('reviewedBy', 'name email');
 
-      socket.emit('report_submission_rejected', {
+      const formattedSubmission = formatReportSubmission(submission);
+
+      socket.emit('report_submission_rejected', { success: true, submission: formattedSubmission });
+
+      await emitSubmissionUpsertToPrivileged(profile, 'report_submission_rejected', {
         success: true,
-        submission: formatReportSubmission(submission),
+        submission: formattedSubmission,
       });
 
-      // Push updated submissions list back to the reviewer
-      const updatedSubmissions = await ReportSubmission.find({
-        projectId: submission.projectId, isDeleted: false,
-      })
-        .populate('submittedBy', 'name email profilePicture')
-        .populate('reviewedBy', 'name email')
-        .sort({ submissionDate: -1, createdAt: -1 });
-
-      socket.emit('report_submissions_list', {
-        submissions: updatedSubmissions.map(s => formatReportSubmission(s)),
-      });
-
-      // Notify the employee
-      emitToUser(submission.submittedBy._id.toString(), 'your_report_submission_rejected', {
-        submission: formatReportSubmission(submission),
+      const submittedById = submission.submittedBy._id?.toString() || submission.submittedBy.toString();
+      emitToUser(submittedById, 'your_report_submission_rejected', {
+        submission: formattedSubmission,
         reviewNotes,
       });
 
+      console.log(`❌ Submission ${submissionId} rejected by ${userId}`);
     } catch (error) {
       console.error('❌ Error rejecting report submission:', error);
       socket.emit('tasker_error', { error: 'Failed to reject report submission' });
@@ -589,7 +697,6 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
           lastSubmission: submissions[submissions.length - 1].submissionDate,
         },
       });
-
     } catch (error) {
       console.error('❌ Error generating consolidated report:', error);
       socket.emit('tasker_error', { error: 'Failed to generate consolidated report', details: error.message });
@@ -655,10 +762,9 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
           dateRange: { start: startDate, end: endDate },
         },
       });
-
     } catch (error) {
       console.error('❌ Error fetching project consolidated reports:', error);
-      socket.emit('tasker_error', { error: 'Failed to fetch consolidated reports', details: error.message });
+      socket.emit('tasker_error', { error: 'Failed to fetch consolidated reports' });
     }
   });
 
@@ -703,11 +809,9 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
       };
 
       socket.emit('report_export_ready', { success: true, data: exportData });
-
     } catch (error) {
       console.error('❌ Error exporting report submissions:', error);
       socket.emit('tasker_error', { error: 'Failed to export report submissions' });
     }
   });
-
 };

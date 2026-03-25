@@ -8,6 +8,7 @@ async function fixIndexes() {
 
     const db = mongoose.connection.db;
     const collection = db.collection('userbackups');
+    
 
     // Get all current indexes
     const indexes = await collection.indexes();
