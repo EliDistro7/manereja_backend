@@ -184,7 +184,7 @@ router.get('/', authenticateToken, verifyProjectAccess, async (req, res) => {
       .sort({ createdAt: -1 })
       .lean();
 
-    console.log(`✅ Found ${tasks.length} tasks for project ${projectId}`);
+   // console.log(`✅ Found ${tasks.length} tasks for project ${projectId}`);
 
     res.json({
       success: true,
