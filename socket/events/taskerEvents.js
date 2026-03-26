@@ -58,7 +58,7 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
   });
 
   // ==========================================
-  // CREATE PROJECT (Owner only)
+  // CREATE PROJECT (Owner/Admin)
   // ==========================================
   socket.on('create_project', async ({
     name, description, businessProfileId,
@@ -66,8 +66,9 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
   }) => {
     try {
       const profile = await BusinessProfile.findById(businessProfileId);
-      if (!profile || profile.ownerId.toString() !== userId) {
-        socket.emit('tasker_error', { error: 'Only owner can create projects' });
+      // ✅ FIX #1: was profile.ownerId.toString() !== userId (owner-only)
+      if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+        socket.emit('tasker_error', { error: 'Only owner or admin can create projects' });
         return;
       }
 
@@ -102,8 +103,9 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
       if (!project) { socket.emit('tasker_error', { error: 'Project not found' }); return; }
 
       const profile = await BusinessProfile.findById(project.businessProfileId);
-      if (!profile || profile.ownerId.toString() !== userId) {
-        socket.emit('tasker_error', { error: 'Only owner can update projects' });
+      // ✅ FIX #2: was profile.ownerId.toString() !== userId (owner-only)
+      if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+        socket.emit('tasker_error', { error: 'Only owner or admin can update projects' });
         return;
       }
 
@@ -121,7 +123,7 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
   });
 
   // ==========================================
-  // DELETE PROJECT (Owner only)
+  // DELETE PROJECT (Owner/Admin)
   // ==========================================
   socket.on('delete_project', async ({ projectId, userId }) => {
     try {
@@ -129,8 +131,9 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
       if (!project) { socket.emit('tasker_error', { error: 'Project not found' }); return; }
 
       const profile = await BusinessProfile.findById(project.businessProfileId);
-      if (!profile || profile.ownerId.toString() !== userId) {
-        socket.emit('tasker_error', { error: 'Only owner can delete projects' });
+      // ✅ FIX #3: was profile.ownerId.toString() !== userId (owner-only)
+      if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+        socket.emit('tasker_error', { error: 'Only owner or admin can delete projects' });
         return;
       }
 
@@ -175,7 +178,7 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
   });
 
   // ==========================================
-  // ADD PROJECT MEMBER (Owner only)
+  // ADD PROJECT MEMBER (Owner/Admin)
   // ==========================================
   socket.on('add_project_member', async ({ projectId, memberId, userId }) => {
     try {
@@ -183,8 +186,9 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
       if (!project) { socket.emit('tasker_error', { error: 'Project not found' }); return; }
 
       const profile = await BusinessProfile.findById(project.businessProfileId);
-      if (!profile || profile.ownerId.toString() !== userId) {
-        socket.emit('tasker_error', { error: 'Only owner can add members' });
+      // ✅ FIX #5: was profile.ownerId.toString() !== userId (owner-only)
+      if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+        socket.emit('tasker_error', { error: 'Only owner or admin can add members' });
         return;
       }
 
@@ -806,7 +810,7 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
   });
 
   // ==========================================
-  // UPDATE TASK WEIGHT
+  // UPDATE TASK WEIGHT (Owner only — intentional)
   // ==========================================
   socket.on('update_task_weight', async ({ taskId, newWeight, userId }) => {
     try {
@@ -816,6 +820,8 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
       const project = await Project.findById(task.projectId);
       const profile = await BusinessProfile.findById(project.businessProfileId);
 
+      // ℹ️  Intentionally owner-only: task weight allocation is a strategic decision.
+      //     Change to isOwnerOrAdmin(profile, userId) if admins should also manage weights.
       if (!profile || profile.ownerId.toString() !== userId) {
         socket.emit('tasker_error', { error: 'Only owner can update task weights' });
         return;
@@ -999,7 +1005,7 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
   });
 
   // ==========================================
-  // VERIFY MILESTONE (Owner only)
+  // VERIFY MILESTONE (Owner/Admin)
   // ==========================================
   socket.on('verify_milestone', async ({ milestoneId, taskId, approved, notes, userId }) => {
     try {
@@ -1008,8 +1014,9 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
       const project = await Project.findById(task.projectId);
       const profile = await BusinessProfile.findById(project.businessProfileId);
 
-      if (profile.ownerId.toString() !== userId) {
-        socket.emit('tasker_error', { error: 'Only owner can verify milestones' });
+      // ✅ FIX #7: was profile.ownerId.toString() !== userId (owner-only)
+      if (!(await isOwnerOrAdmin(profile, userId))) {
+        socket.emit('tasker_error', { error: 'Only owner or admin can verify milestones' });
         return;
       }
 
@@ -1113,8 +1120,9 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
       if (!project) { socket.emit('tasker_error', { error: 'Project not found' }); return; }
 
       const profile = await BusinessProfile.findById(project.businessProfileId);
-      if (!profile || profile.ownerId.toString() !== userId) {
-        socket.emit('tasker_error', { error: 'Only owner can invite members' });
+      // ✅ FIX #4: was profile.ownerId.toString() !== userId (owner-only)
+      if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+        socket.emit('tasker_error', { error: 'Only owner or admin can invite members' });
         return;
       }
 
