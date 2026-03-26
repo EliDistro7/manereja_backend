@@ -2,7 +2,7 @@ const Notification = require("../../models/NotificationsSchema.js");
 const User = require("../../models/userSchema.js");
 const Event = require("../../models/eventSchema.js");
 
-module.exports = function notificationEvents(io, socket, userSockets) {
+module.exports = function notificationEvents(io, socket, userSockets, roomSocketsMap, socketToUser) {
   // Helper function to get the username based on userId
   const getUsernameById = async (userId) => {
     try {
@@ -15,32 +15,32 @@ module.exports = function notificationEvents(io, socket, userSockets) {
   };
 
   // Helper function to notify users in real-time via Socket.io
-  const notifyUser = async (userId, event, eventData) => {
-    
+  // userSockets is a Map of userId → Set<socketId>, so we iterate the Set
+  const notifyUser = (userId, event, eventData) => {
+    console.log('Sending notification to user:', userId);
+    const sockets = userSockets[userId];
+    console.log('Target sockets:', sockets);
+    console.log('All user sockets:', userSockets);
 
-    console.log('sendng notification to user')
-       // Notify the recipient in real time
-      // notifyUser(userId, "new_message", { senderName, messageContent });
-    const targetSocketId = userSockets[userId];
-    console.log('target socket', targetSocketId)
-    console.log('user sockets', userSockets)
-    if (targetSocketId) {
-      console.log('succesful sent message to user')
-      io.to(targetSocketId).emit(event, eventData);
+    if (!sockets || sockets.size === 0) return;
+
+    for (const socketId of sockets) {
+      console.log('Successfully sent event to socket:', socketId);
+      io.to(socketId).emit(event, eventData);
     }
   };
 
   // Create and store a new notification
-  const createNotification = async ({ senderName,user, type, message, eventId = null }) => {
+  const createNotification = async ({ senderName, user, type, message, eventId = null }) => {
     try {
-      console.log('Creating notification', senderName, user, type, message, eventId)
+      console.log('Creating notification', senderName, user, type, message, eventId);
       const notification = new Notification({
-        user: user,  // Recipient of the notification
-        event: eventId, // Optional event reference
+        user,
+        event: eventId,
         type,
         message,
         senderName,
-        read: false, // Default is unread
+        read: false,
       });
 
       await notification.save();
@@ -67,29 +67,25 @@ module.exports = function notificationEvents(io, socket, userSockets) {
     }
   });
 
-  // Listen for 'follow_event' event
+  // Listen for 'media_added' event
   socket.on("media_added", async ({ userId, eventId, senderName, mediaType, eventTitle }) => {
     try {
       console.log("Handling media_added event...");
-  
-      // Fetch the event with followers
+
       const event = await Event.findById(eventId).populate("followers");
       if (!event) {
         console.error("Event not found:", eventId);
         return;
       }
 
-      //console.log('followers of the event:', event)
-  
       const message = `${senderName} added new ${mediaType} in album ${event.title}.`;
-  
-      // Get followers (excluding the sender)
+
       const recipients = event.followers
         .map((follower) => follower._id.toString())
         .filter((followerId) => followerId !== userId.toString());
-  
+
       console.log(`Notifying ${recipients.length} followers...`);
-  
+
       for (const recipientId of recipients) {
         await createNotification({
           user: recipientId,
@@ -98,21 +94,20 @@ module.exports = function notificationEvents(io, socket, userSockets) {
           eventId,
           senderName,
         });
-  
+
         notifyUser(recipientId, "media_added", { senderName, message });
       }
     } catch (err) {
       console.error("Error handling media_added event:", err);
     }
   });
-  
 
-  // Listen for 'like_event' eve
+  // Listen for 'like_event' event
   socket.on("like_event", async ({ userId, eventId, eventOwnerId }) => {
     try {
       console.log('event owner id', eventOwnerId);
       const username = await getUsernameById(userId);
-      const message = `${username} liked your event.`
+      const message = `${username} liked your event.`;
 
       await createNotification({
         user: eventOwnerId,
@@ -120,106 +115,89 @@ module.exports = function notificationEvents(io, socket, userSockets) {
         message,
         eventId,
         senderId: userId,
-        senderName:username
+        senderName: username,
       });
-       // Notify the recipient in real time
-       notifyUser(eventOwnerId, "like_added", { senderName:username, message });
+
+      notifyUser(eventOwnerId, "like_added", { senderName: username, message });
     } catch (err) {
       console.error("Error handling like_event event:", err);
     }
   });
 
   // Listen for 'view_event' event
-  socket.on("view_event", async ({ userId, eventId, senderName}) => {
+  socket.on("view_event", async ({ userId, eventId, senderName }) => {
     try {
-      //const username = await getUsernameById(userId);
       const message = `${senderName} viewed your event.`;
 
-    
-     
+      await createNotification({
+        user: userId,
+        type: "view_event",
+        message,
+        senderName,
+        eventId,
+      });
 
-       await createNotification({
-         user: userId,
-         type: "view_event",
-         message,
-         senderName: senderName,
-         eventId:eventId,
-       });
-
-       // Notify the recipient in real time
       notifyUser(userId, "view_added", { senderName, message });
     } catch (err) {
       console.error("Error handling view_event event:", err);
     }
   });
 
-  // Listen for 'view_event' event
-  socket.on("collaboration_accepted", async ({ userId, eventId, senderName}) => {
+  // Listen for 'collaboration_accepted' event
+  socket.on("collaboration_accepted", async ({ userId, eventId, senderName }) => {
     try {
-      //const username = await getUsernameById(userId);
       const message = `${senderName} accepted your request.`;
 
-    
-     
+      await createNotification({
+        user: userId,
+        type: "collaboration_accepted",
+        message,
+        senderName,
+        eventId,
+      });
 
-       await createNotification({
-         user: userId,
-         type: "collaboration_accepted",
-         message,
-         senderName: senderName,
-         eventId:eventId,
-       });
-
-       // Notify the recipient in real time
       notifyUser(userId, "collaboration_accepted", { senderName, message });
     } catch (err) {
-      console.error("Error handling collaboration requets event:", err);
+      console.error("Error handling collaboration_accepted event:", err);
     }
   });
 
-   // Listen for 'view_event' event
-   socket.on("collaboration_requested", async ({ userId, eventId, senderName}) => {
+  // Listen for 'collaboration_requested' event
+  socket.on("collaboration_requested", async ({ userId, eventId, senderName }) => {
     try {
-      //const username = await getUsernameById(userId);
       const message = `${senderName} is requesting to collaborate in your event.`;
 
-    
-     
+      await createNotification({
+        user: userId,
+        type: "collaboration_requested",
+        message,
+        senderName,
+        eventId,
+      });
 
-       await createNotification({
-         user: userId,
-         type: "collaboration_requested",
-         message,
-         senderName: senderName,
-         eventId:eventId,
-       });
-
-       // Notify the recipient in real time
       notifyUser(userId, "collaboration_requested", { senderName, message });
     } catch (err) {
-      console.error("Error handling view_event event:", err);
+      console.error("Error handling collaboration_requested event:", err);
     }
   });
 
-  // Listen for 'send_message' event
-  socket.on("new_message", async ({eventId, senderName, userId, messageContent }) => {
+  // Listen for 'new_message' event
+  socket.on("new_message", async ({ eventId, senderName, userId, messageContent }) => {
     try {
-      console.log('message received')
-      // const senderName = await getUsernameById(senderId);
+      console.log('message received');
       const message = `${senderName} sent you a message: "${messageContent}"`;
 
       await createNotification({
         user: userId,
         type: "new_message",
         message,
-        senderName: senderName,
-        eventId:eventId,
+        senderName,
+        eventId,
       });
 
-      // Notify the recipient in real time
       notifyUser(userId, "new_message", { senderName, messageContent });
     } catch (err) {
-      console.error("Error handling send_message event:", err);
+      console.error("Error handling new_message event:", err);
     }
   });
 
