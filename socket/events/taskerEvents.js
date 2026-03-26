@@ -14,10 +14,13 @@ const {
   canUpdateTaskWeight,
 } = require('./taskerHelper');
 
-// ✅ FIX: signature now accepts all 5 args to match socket.js call:
-//    taskerEvents(io, socket, userSockets, roomSocketsMap, socketToUser)
-//    Previously only had (io, socket, userSockets) so userSockets was
-//    actually receiving roomSocketsMap — breaking all socket lookups.
+// ─── Shared helper: matches docs where isDeleted is false OR field doesn't exist ─
+// Fixes silent data loss on older documents that never had isDeleted set.
+function notDeleted() {
+  return { $or: [{ isDeleted: false }, { isDeleted: { $exists: false } }] };
+}
+// ────────────────────────────────────────────────────────────────────────────
+
 module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, socketToUser) {
 
   // ==========================================
@@ -41,7 +44,8 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
         return;
       }
 
-      const projects = await Project.find({ businessProfileId, isDeleted: false })
+      // ✅ FIX: notDeleted() catches older docs where isDeleted was never set
+      const projects = await Project.find({ businessProfileId, ...notDeleted() })
         .populate('createdBy', 'name email')
         .sort({ updatedAt: -1 })
         .lean();
@@ -136,15 +140,15 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
       await project.save();
 
       const tasksResult = await Task.updateMany(
-        { projectId, isDeleted: false },
+        { projectId, ...notDeleted() },
         { isDeleted: true, deletedAt: new Date(), deletedBy: userId }
       );
       const commentsResult = await TaskComment.updateMany(
-        { projectId, isDeleted: false },
+        { projectId, ...notDeleted() },
         { isDeleted: true, deletedAt: new Date() }
       );
       const milestonesResult = await TaskMilestone.updateMany(
-        { projectId, isDeleted: false },
+        { projectId, ...notDeleted() },
         { isDeleted: true, deletedAt: new Date() }
       );
       const invitationsResult = await ProjectInvitation.deleteMany({ projectId });
@@ -184,12 +188,13 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
         return;
       }
 
-      if (!profile.members[memberId]) {
+      // ✅ FIX: use profile.hasAccess() instead of bracket notation on Mongoose Map
+      if (!profile.hasAccess(memberId)) {
         socket.emit('tasker_error', { error: 'User not in business profile' });
         return;
       }
 
-      if (!project.memberIds.includes(memberId)) {
+      if (!project.memberIds.map(id => id.toString()).includes(memberId)) {
         project.memberIds.push(memberId);
         project.updatedAt = new Date();
         await project.save();
@@ -199,7 +204,6 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
         projectId: project._id.toString(), memberId, addedBy: userId,
       });
 
-      // ✅ FIX: emit to all sockets of the member (Set-based)
       emitToUser(memberId, 'project_member_added', {
         project: formatProject(project),
         message: `You've been added to project: ${project.name}`,
@@ -221,7 +225,8 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
         return;
       }
 
-      const tasks = await Task.find({ projectId, isDeleted: false })
+      // ✅ FIX: notDeleted() catches older tasks where isDeleted was never set
+      const tasks = await Task.find({ projectId, ...notDeleted() })
         .populate('assignedTo', 'name email profilePicture')
         .populate('createdBy', 'name email')
         .sort({ createdAt: -1 });
@@ -237,7 +242,7 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
   });
 
   // ==========================================
-  // CREATE TASK (Owner only)
+  // CREATE TASK (Owner/Admin only)
   // ==========================================
   socket.on('create_task', async ({
     projectId, title, description, assignedTo,
@@ -252,7 +257,7 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
 
       const profile = await BusinessProfile.findById(project.businessProfileId);
       if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
-  socket.emit('tasker_error', { error: 'Only owner or admin can create tasks' });
+        socket.emit('tasker_error', { error: 'Only owner or admin can create tasks' });
         return;
       }
 
@@ -332,7 +337,6 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
         goalContribution,
       });
 
-      // ✅ FIX: notify all assignees via Set-based emitToUser
       for (const assigneeId of assignees) {
         emitToUser(assigneeId, 'task_assigned_to_you', {
           task: formattedTask,
@@ -364,7 +368,7 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
       const profile = await BusinessProfile.findById(project.businessProfileId);
 
       if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
-  socket.emit('tasker_error', { error: 'Only owner or admin can assign tasks' });
+        socket.emit('tasker_error', { error: 'Only owner or admin can assign tasks' });
         return;
       }
 
@@ -378,7 +382,7 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
       }
 
       for (const id of newAssignees) {
-        if (!project.memberIds.includes(id)) {
+        if (!project.memberIds.map(mid => mid.toString()).includes(id)) {
           socket.emit('tasker_error', { error: `User ${id} is not a project member` });
           return;
         }
@@ -424,67 +428,66 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
   // ==========================================
   // ADD SINGLE ASSIGNEE
   // ==========================================
-socket.on('add_task_assignee', async ({ taskId, assigneeId, userId }) => {
-  try {
-    const task = await Task.findById(taskId);
-    if (!task) { socket.emit('tasker_error', { error: 'Task not found' }); return; }
+  socket.on('add_task_assignee', async ({ taskId, assigneeId, userId }) => {
+    try {
+      const task = await Task.findById(taskId);
+      if (!task) { socket.emit('tasker_error', { error: 'Task not found' }); return; }
 
-    const project = await Project.findById(task.projectId);
-    const profile = await BusinessProfile.findById(project.businessProfileId);
+      const project = await Project.findById(task.projectId);
+      const profile = await BusinessProfile.findById(project.businessProfileId);
 
-    if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
-  socket.emit('tasker_error', { error: 'Only owner or admin can assign tasks' });
-      return;
+      if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+        socket.emit('tasker_error', { error: 'Only owner or admin can assign tasks' });
+        return;
+      }
+
+      // ✅ use hasAccess() — safe for Mongoose Map
+      if (!profile.hasAccess(assigneeId)) {
+        console.log('User is not in this business profile');
+        socket.emit('tasker_error', { error: 'User is not in this business profile' });
+        return;
+      }
+
+      const alreadyAssigned = task.assignedTo.some(id => id.toString() === assigneeId);
+      if (alreadyAssigned) {
+        console.log('User is already assigned');
+        socket.emit('tasker_error', {
+          error: 'User is already assigned to this task',
+          taskId: taskId,
+        });
+        return;
+      }
+
+      // Auto-add to project.memberIds if not already there
+      if (!project.memberIds.map(id => id.toString()).includes(assigneeId)) {
+        project.memberIds.push(assigneeId);
+        project.updatedAt = new Date();
+        await project.save();
+      }
+
+      task.assignedTo.push(assigneeId);
+      task.updatedAt = new Date();
+      await task.save();
+      await task.populate('assignedTo', 'name email profilePicture');
+      await task.populate('createdBy', 'name email');
+
+      const formattedTask = formatTask(task);
+
+      broadcastToProject(io, userSockets, project, 'task_updated', {
+        task: formattedTask, updateType: 'assignee_added', addedAssigneeId: assigneeId,
+      });
+
+      emitToUser(assigneeId, 'task_assigned_to_you', {
+        task: formattedTask, assignedBy: userId,
+        message: `You've been assigned to task: ${task.title}`,
+      });
+
+      socket.emit('task_assignment_updated', { success: true, task: formattedTask });
+    } catch (error) {
+      console.error('❌ Error adding task assignee:', error);
+      socket.emit('tasker_error', { error: 'Failed to add assignee' });
     }
-
-    // ✅ Check profile access (not project membership)
-    if (!profile.hasAccess(assigneeId)) {
-      console.log('User is not in this business profile');
-      socket.emit('tasker_error', { error: 'User is not in this business profile' });
-      return;
-    }
-
-    const alreadyAssigned = task.assignedTo.some(id => id.toString() === assigneeId);
-  // In add_task_assignee handler
-if (alreadyAssigned) {
-  console.log('User is already assigned');
-  socket.emit('tasker_error', { 
-    error: 'User is already assigned to this task',
-    taskId: taskId,  // ✅ Include taskId so Flutter can resync
   });
-  return;
-}
-
-    // ✅ Auto-add to project.memberIds if not already there
-    if (!project.memberIds.map(id => id.toString()).includes(assigneeId)) {
-      project.memberIds.push(assigneeId);
-      project.updatedAt = new Date();
-      await project.save();
-    }
-
-    task.assignedTo.push(assigneeId);
-    task.updatedAt = new Date();
-    await task.save();
-    await task.populate('assignedTo', 'name email profilePicture');
-    await task.populate('createdBy', 'name email');
-
-    const formattedTask = formatTask(task);
-
-    broadcastToProject(io, userSockets, project, 'task_updated', {
-      task: formattedTask, updateType: 'assignee_added', addedAssigneeId: assigneeId,
-    });
-
-    emitToUser(assigneeId, 'task_assigned_to_you', {
-      task: formattedTask, assignedBy: userId,
-      message: `You've been assigned to task: ${task.title}`,
-    });
-
-    socket.emit('task_assignment_updated', { success: true, task: formattedTask });
-  } catch (error) {
-    console.error('❌ Error adding task assignee:', error);
-    socket.emit('tasker_error', { error: 'Failed to add assignee' });
-  }
-});
 
   // ==========================================
   // REMOVE SINGLE ASSIGNEE
@@ -497,8 +500,8 @@ if (alreadyAssigned) {
       const project = await Project.findById(task.projectId);
       const profile = await BusinessProfile.findById(project.businessProfileId);
 
-  if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
-  socket.emit('tasker_error', { error: 'Only owner or admin can unassign tasks' });
+      if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+        socket.emit('tasker_error', { error: 'Only owner or admin can unassign tasks' });
         return;
       }
 
@@ -542,8 +545,8 @@ if (alreadyAssigned) {
       const project = await Project.findById(task.projectId);
       const profile = await BusinessProfile.findById(project.businessProfileId);
 
-     if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
-  socket.emit('tasker_error', { error: 'Only owner or admin can reassign tasks' });
+      if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+        socket.emit('tasker_error', { error: 'Only owner or admin can reassign tasks' });
         return;
       }
 
@@ -557,7 +560,7 @@ if (alreadyAssigned) {
       }
 
       for (const id of newAssignees) {
-        if (!project.memberIds.includes(id)) {
+        if (!project.memberIds.map(mid => mid.toString()).includes(id)) {
           socket.emit('tasker_error', { error: `User ${id} is not a project member` });
           return;
         }
@@ -653,7 +656,7 @@ if (alreadyAssigned) {
   });
 
   // ==========================================
-  // UPDATE TASK PROGRESS (Owner override only)
+  // UPDATE TASK PROGRESS (Owner/Admin override)
   // ==========================================
   socket.on('owner_update_task_progress', async ({ taskId, progressPercentage, progressNotes, userId }) => {
     try {
@@ -663,8 +666,8 @@ if (alreadyAssigned) {
       const project = await Project.findById(task.projectId);
       const profile = await BusinessProfile.findById(project.businessProfileId);
 
-   if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
-  socket.emit('tasker_error', { error: 'Only owner or admin can override task progress' })
+      if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+        socket.emit('tasker_error', { error: 'Only owner or admin can override task progress' });
         return;
       }
 
@@ -703,60 +706,56 @@ if (alreadyAssigned) {
     }
   });
 
-
   // ==========================================
-// UPDATE TASK FIELDS (title, description, priority, dates, tags, estimatedHours)
-// ==========================================
-socket.on('update_task', async ({ taskId, updates, userId }) => {
-  try {
-    const task = await Task.findById(taskId);
-    if (!task) { socket.emit('tasker_error', { error: 'Task not found' }); return; }
+  // UPDATE TASK FIELDS
+  // ==========================================
+  socket.on('update_task', async ({ taskId, updates, userId }) => {
+    try {
+      const task = await Task.findById(taskId);
+      if (!task) { socket.emit('tasker_error', { error: 'Task not found' }); return; }
 
-    const project = await Project.findById(task.projectId);
-    const profile = await BusinessProfile.findById(project.businessProfileId);
+      const project = await Project.findById(task.projectId);
+      const profile = await BusinessProfile.findById(project.businessProfileId);
 
-    if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
-      socket.emit('tasker_error', { error: 'Only owner or admin can update tasks' });
-      return;
-    }
-
-    // Apply only the fields that were sent
-    const allowedFields = ['title', 'description', 'priority', 'dueDate', 'startDate', 'estimatedHours', 'tags'];
-    for (const field of allowedFields) {
-      if (updates[field] !== undefined) {
-        task[field] = updates[field];
+      if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+        socket.emit('tasker_error', { error: 'Only owner or admin can update tasks' });
+        return;
       }
+
+      const allowedFields = ['title', 'description', 'priority', 'dueDate', 'startDate', 'estimatedHours', 'tags'];
+      for (const field of allowedFields) {
+        if (updates[field] !== undefined) {
+          task[field] = updates[field];
+        }
+      }
+
+      task.updatedAt = new Date();
+      await task.save();
+      await task.populate('assignedTo', 'name email profilePicture');
+      await task.populate('createdBy', 'name email');
+
+      broadcastToProject(io, userSockets, project, 'task_updated', {
+        task: formatTask(task),
+        updateType: 'fields_updated',
+        updatedBy: userId,
+      });
+
+      socket.emit('task_update_success', { success: true, task: formatTask(task) });
+    } catch (error) {
+      console.error('❌ Error updating task:', error);
+      socket.emit('tasker_error', { error: 'Failed to update task', details: error.message });
     }
-
-    task.updatedAt = new Date();
-    await task.save();
-    await task.populate('assignedTo', 'name email profilePicture');
-    await task.populate('createdBy', 'name email');
-
-    broadcastToProject(io, userSockets, project, 'task_updated', {
-      task: formatTask(task),
-      updateType: 'fields_updated',
-      updatedBy: userId,
-    });
-
-    socket.emit('task_update_success', { success: true, task: formatTask(task) });
-  } catch (error) {
-    console.error('❌ Error updating task:', error);
-    socket.emit('tasker_error', { error: 'Failed to update task', details: error.message });
-  }
-});
+  });
 
   // ==========================================
-  // UPDATE TASK TASKPLACE SETTINGS 
+  // UPDATE TASK TASKPLACE SETTINGS
   // ==========================================
   socket.on('update_task_taskplace', async ({
     taskId, taskplaceLocation, taskplaceRadius,
     requireLocationVerification, allocatedTimeHours, userId
   }) => {
     try {
-      console.log(`\n📍 [update_task_taskplace] =============================`);
-      console.log(`   taskId: ${taskId}`);
-      console.log(`   taskplaceLocation: ${JSON.stringify(taskplaceLocation)}`);
+      console.log(`\n📍 [update_task_taskplace] taskId: ${taskId}`);
 
       const task = await Task.findById(taskId);
       if (!task) { socket.emit('tasker_error', { error: 'Task not found' }); return; }
@@ -766,7 +765,7 @@ socket.on('update_task', async ({ taskId, updates, userId }) => {
 
       const profile = await BusinessProfile.findById(project.businessProfileId);
       if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
-  socket.emit('tasker_error', { error: 'Only owner or admin can update taskplace settings' });
+        socket.emit('tasker_error', { error: 'Only owner or admin can update taskplace settings' });
         return;
       }
 
@@ -777,7 +776,6 @@ socket.on('update_task', async ({ taskId, updates, userId }) => {
           });
           return;
         }
-        console.log(`   ✅ Coordinates validated: ${taskplaceLocation.coordinates.latitude}, ${taskplaceLocation.coordinates.longitude}`);
       }
 
       task.taskplaceLocation = taskplaceLocation || null;
@@ -790,8 +788,6 @@ socket.on('update_task', async ({ taskId, updates, userId }) => {
 
       task.updatedAt = new Date();
       await task.save();
-      console.log(`   ✅ Task saved`);
-
       await task.populate('assignedTo', 'name email profilePicture');
       await task.populate('createdBy', 'name email');
 
@@ -802,7 +798,7 @@ socket.on('update_task', async ({ taskId, updates, userId }) => {
       });
 
       socket.emit('taskplace_update_success', { success: true, task: formattedTask });
-      console.log(`📍 [update_task_taskplace] ✅ Done\n`);
+      console.log(`📍 [update_task_taskplace] ✅ Done`);
     } catch (error) {
       console.error('❌ Error updating taskplace:', error);
       socket.emit('tasker_error', { error: 'Failed to update taskplace settings', details: error.message });
@@ -1034,7 +1030,6 @@ socket.on('update_task', async ({ taskId, updates, userId }) => {
         milestoneId: milestone._id.toString(), verifiedBy: userId, approved, notes,
       });
 
-      // ✅ FIX: notify all assignees via Set-based emitToUser
       for (const assigneeId of task.assignedTo) {
         emitToUser(assigneeId.toString(), 'milestone_verified', {
           milestone: formatMilestone(milestone),
@@ -1053,7 +1048,7 @@ socket.on('update_task', async ({ taskId, updates, userId }) => {
   // ==========================================
   socket.on('get_comments', async ({ taskId }) => {
     try {
-      const comments = await TaskComment.find({ taskId, isDeleted: false })
+      const comments = await TaskComment.find({ taskId, ...notDeleted() })
         .populate('userId', 'name email profilePicture')
         .sort({ createdAt: 1 }).lean();
       socket.emit('comments_list', { taskId, comments: comments.map(formatComment) });
@@ -1080,7 +1075,6 @@ socket.on('update_task', async ({ taskId, updates, userId }) => {
 
       const project = await Project.findById(task.projectId);
 
-      // ✅ FIX: broadcastToProject now correctly iterates Set-based userSockets
       broadcastToProject(io, userSockets, project, 'comment_added', {
         comment: formatComment(newComment),
       });
@@ -1127,7 +1121,7 @@ socket.on('update_task', async ({ taskId, updates, userId }) => {
       const invitee = await User.findOne({ email: inviteeEmail });
       if (!invitee) { socket.emit('tasker_error', { error: 'User not found with this email' }); return; }
 
-      if (project.memberIds.includes(invitee._id.toString())) {
+      if (project.memberIds.map(id => id.toString()).includes(invitee._id.toString())) {
         socket.emit('tasker_error', { error: 'User is already a project member' });
         return;
       }
@@ -1167,7 +1161,7 @@ socket.on('update_task', async ({ taskId, updates, userId }) => {
       const project = await Project.findById(invitation.projectId);
       if (!project) { socket.emit('tasker_error', { error: 'Project not found' }); return; }
 
-      if (!project.memberIds.includes(userId)) {
+      if (!project.memberIds.map(id => id.toString()).includes(userId)) {
         project.memberIds.push(userId);
         project.updatedAt = new Date();
         await project.save();
@@ -1238,7 +1232,8 @@ socket.on('update_task', async ({ taskId, updates, userId }) => {
       const project = await Project.findById(projectId);
       if (!project) { socket.emit('tasker_error', { error: 'Project not found' }); return; }
 
-      const tasks = await Task.find({ projectId, isDeleted: false }).lean();
+      // ✅ FIX: notDeleted() for consistent task fetch
+      const tasks = await Task.find({ projectId, ...notDeleted() }).lean();
       const weightAllocation = tasks.map(task => ({
         taskId: task._id.toString(), title: task.title,
         weight: task.weightPercentage || 0, progress: task.progressPercentage || 0,
@@ -1286,10 +1281,6 @@ socket.on('update_task', async ({ taskId, updates, userId }) => {
   // HELPER FUNCTIONS
   // ==========================================
 
-  /**
-   * ✅ FIX: emit to ALL active sockets of a user (Set-based userSockets).
-   * Replaces the old pattern of: const socketId = userSockets[userId]; io.to(socketId).emit(...)
-   */
   function emitToUser(userId, event, data) {
     const sockets = userSockets[userId];
     if (!sockets || sockets.size === 0) return;
@@ -1298,17 +1289,15 @@ socket.on('update_task', async ({ taskId, updates, userId }) => {
     }
   }
 
-async function isOwnerOrAdmin(profile, userId) {
-  if (!profile) return false;
-  if (profile.ownerId.toString() === userId.toString()) return true;
-
-  // profile.members is a Mongoose Map — must use .get(), not bracket notation
-  const member = profile.members instanceof Map
-    ? profile.members.get(userId.toString())
-    : (profile.members || {})[userId.toString()];
-
-  return member?.role === 'admin';
-}
+  async function isOwnerOrAdmin(profile, userId) {
+    if (!profile) return false;
+    if (profile.ownerId.toString() === userId.toString()) return true;
+    // ✅ profile.members is a Mongoose Map — must use .get(), not bracket notation
+    const member = profile.members instanceof Map
+      ? profile.members.get(userId.toString())
+      : (profile.members || {})[userId.toString()];
+    return member?.role === 'admin';
+  }
 
   function formatEmbeddedLocation(loc) {
     if (!loc || loc.coordinates?.latitude == null) return null;
@@ -1494,11 +1483,16 @@ async function isOwnerOrAdmin(profile, userId) {
     };
   }
 
-  // ✅ FIX: broadcastToProfile now iterates Set<socketId> correctly
+  // ✅ FIX: use getMemberIds() or iterate Map correctly — Object.keys() breaks on Mongoose Maps
   async function broadcastToProfile(io, userSockets, businessProfileId, event, data) {
     const profile = await BusinessProfile.findById(businessProfileId);
     if (!profile) return;
-    const userIds = [profile.ownerId.toString(), ...Object.keys(profile.members)];
+
+    const memberIds = profile.members instanceof Map
+      ? [...profile.members.keys()]
+      : Object.keys(profile.members || {});
+
+    const userIds = [profile.ownerId.toString(), ...memberIds];
     for (const userId of [...new Set(userIds)]) {
       const sockets = userSockets[userId];
       if (sockets) {
@@ -1509,7 +1503,6 @@ async function isOwnerOrAdmin(profile, userId) {
     }
   }
 
-  // ✅ FIX: broadcastToProject now iterates Set<socketId> correctly
   async function broadcastToProject(io, userSockets, project, event, data) {
     const userIds = [
       project.createdBy.toString(),
