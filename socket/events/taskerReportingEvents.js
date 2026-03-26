@@ -7,7 +7,7 @@ const {
   generateCommentActivityReport,
 } = require('./taskerReportingHelper');
 
-module.exports = function taskerReportingEvents(io, socket, userSockets) {
+module.exports = function taskerReportingEvents(io, socket, userSockets, roomSocketsMap, socketToUser) {
   
   // ==========================================
   // GET PROJECT PROGRESS REPORT (Owner only)
@@ -87,7 +87,6 @@ module.exports = function taskerReportingEvents(io, socket, userSockets) {
         includeComments,
         includeTaskDetails,
       });
-
 
       console.log('employee report', report);
 
@@ -442,7 +441,6 @@ function getWeekNumber(date) {
 
 function formatProjectReportForExport(report, format) {
   if (format === 'csv') {
-    // Format as CSV-friendly structure
     return {
       summary: [
         ['Metric', 'Value'],
@@ -515,4 +513,3 @@ function formatTeamReportForExport(report, format) {
 
   return report;
 }
-
