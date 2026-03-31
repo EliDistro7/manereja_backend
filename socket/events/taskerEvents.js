@@ -3,6 +3,7 @@ const Project = require('../../models/manereja/project.js');
 const Task = require('../../models/manereja/task.js');
 const TaskMilestone = require('../../models/manereja/task-milestone.js');
 const TaskComment = require('../../models/manereja/task-comment.js');
+const ReportTemplate = require('../../models/manereja/report-template.js');
 const BusinessProfile = require('../../models/manereja/business-profile.js');
 const ProjectInvitation = require('../../models/manereja/project-invitation.js');
 const User = require('../../models/manereja/user.js');
@@ -13,6 +14,28 @@ const {
   calculateGoalContribution,
   canUpdateTaskWeight,
 } = require('./taskerHelper');
+
+
+async function notifyAssigneeOfTaskTemplate({task, newAssigneeIds, formatReportTemplate, formatTask}) {
+  const templateId = task.metadata?.get?.('reportTemplateId') 
+    ?? (task.metadata instanceof Map 
+        ? task.metadata.get('reportTemplateId') 
+        : task.metadata?.reportTemplateId);
+  if (!templateId) return;
+
+  const template = await ReportTemplate.findById(templateId);
+  if (!template) return;
+
+  const formattedTemplate = formatReportTemplate(template);
+  const formattedTask    = formatTask(task);
+
+  for (const assigneeId of newAssigneeIds) {
+    emitToUser(assigneeId, 'report_template_attached_to_your_task', {
+      task: formattedTask,
+      template: formattedTemplate,
+    });
+  }
+}
 
 // ─── Shared helper: matches docs where isDeleted is false OR field doesn't exist ─
 // Fixes silent data loss on older documents that never had isDeleted set.
@@ -93,6 +116,8 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
       socket.emit('tasker_error', { error: 'Failed to create project' });
     }
   });
+
+  
 
   // ==========================================
   // UPDATE PROJECT
@@ -326,6 +351,8 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
       await newTask.populate('assignedTo', 'name email profilePicture');
       await newTask.populate('createdBy', 'name email');
 
+      await notifyAssigneeOfTaskTemplate({task: newTask, newAssigneeIds: assignees, formatReportTemplate, formatTask});
+
       const formattedTask = formatTask(newTask);
       const updatedProject = await updateProjectProgress(projectId);
 
@@ -472,6 +499,7 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
       task.assignedTo.push(assigneeId);
       task.updatedAt = new Date();
       await task.save();
+      await notifyAssigneeOfTaskTemplate({task, newAssigneeIds: [assigneeId], formatReportTemplate, formatTask});
       await task.populate('assignedTo', 'name email profilePicture');
       await task.populate('createdBy', 'name email');
 

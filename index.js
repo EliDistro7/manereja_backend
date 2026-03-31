@@ -1,3 +1,4 @@
+
 const express = require("express");
 const mongoose = require("mongoose");
 const dotenv = require("dotenv");
@@ -32,7 +33,8 @@ const emailRoutes= require('./routes/manereja/email-routes.js');
 const authEmailRoutes = require('./routes/manereja/auth_email.js');
 const seedAdmin = require('./models/manereja/seed_admin.js');
 const adminRoutes = require('./routes/manereja/admin-routes.js');
-require('./cron/expireSubscriptions');
+const { userSockets } = require('./socket/base');
+//require('./cron/expireSubscriptions');
 
 const PORT = process.env.PORT || 5000;
 
@@ -110,8 +112,10 @@ mongoose.connect(process.env.MONGO_URL, {
 
 // Initialize Socket.IO
 const io = initSocket(server);
-
+app.set('io', io);
+app.set('userSockets', userSockets);
 // Routes
+app.use('/auth', adminRoutes);
 app.use('/auth/agents', agentsRouter);
 app.use('/', packageRoutes);
 app.use('/locations', locationRoutes);
@@ -119,7 +123,7 @@ app.use('/', userRoutes);
 app.use('/', serviceRoutes);
 
 
-app.use('/auth', adminRoutes);
+
 app.use('/sync', syncRoutes);
 app.use('/profiles', profileRoutes);
 app.use('/api/sales-items', salesItemRoutes);

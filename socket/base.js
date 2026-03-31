@@ -311,4 +311,4 @@ function getIo() {
   return io;
 }
 
-module.exports = { initSocket, getIo };
+module.exports = { initSocket, getIo, userSockets };

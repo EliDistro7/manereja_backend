@@ -4,6 +4,8 @@ const Task = require('../../models/manereja/task.js');
 const Project = require('../../models/manereja/project.js');
 const BusinessProfile = require('../../models/manereja/business-profile.js');
 const User = require('../../models/manereja/user.js');
+const { notifyProfileAdmins } = require('../../services/businessNotificationService');
+
 
 // ─── Coloured log helpers ────────────────────────────────────────────────────
 const LOG_PREFIX = '[SubmissionEvents]';
@@ -51,6 +53,28 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
     debug(`isOwnerOrAdmin → profile ${profile._id}, userId ${userId}, role: "${role}"`);
     return role === 'owner' || role === 'admin';
   }
+
+  async function notifyAssigneeOfTaskTemplate(task, newAssigneeIds) {
+  const templateId = task.metadata?.get?.('reportTemplateId') 
+    ?? (task.metadata instanceof Map 
+        ? task.metadata.get('reportTemplateId') 
+        : task.metadata?.reportTemplateId);
+  if (!templateId) return;
+
+  const template = await ReportTemplate.findById(templateId);
+  if (!template) return;
+
+  const formattedTemplate = formatReportTemplate(template);
+  const formattedTask    = formatTask(task);
+
+  for (const assigneeId of newAssigneeIds) {
+    emitToUser(assigneeId, 'report_template_attached_to_your_task', {
+      task: formattedTask,
+      template: formattedTemplate,
+    });
+  }
+}
+  
 
   async function emitSubmissionUpsertToPrivileged(profile, event, payload) {
     const ownerId = profile.ownerId.toString();
@@ -608,6 +632,22 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
         };
 
         await emitSubmissionUpsertToPrivileged(profile, 'report_submission_received', payload);
+        await notifyProfileAdmins(resolvedBusinessProfileId, {
+  title:    `New report submitted`,
+  body:     `${(await User.findById(userId).select('name'))?.name ?? 'An employee'} submitted a report for task "${task.title}".`,
+  type:     'alert',
+  priority: 'normal',
+  persist:  false,   // already emitted via emitSubmissionUpsertToPrivileged — skip DB save
+  metadata: {
+    event:        'report_submitted',
+    submissionId: submission._id.toString(),
+    taskId:       taskId,
+    taskTitle:    task.title,
+    templateId,
+    submittedBy:  userId,
+    businessProfileId: resolvedBusinessProfileId,
+  },
+});
         ok(`save_report_submission → ✅ notified privileged users of profile ${profile._id}`);
       } else {
         log(`save_report_submission → draft saved, no notification sent`);
@@ -617,6 +657,38 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
       socket.emit('tasker_error', { error: 'Failed to save report submission', details: error.message });
     }
   });
+
+  socket.on('update_report_template', async ({ templateId, updates, userId }) => {
+  try {
+    const template = await ReportTemplate.findById(templateId);
+    if (!template) { socket.emit('tasker_error', { error: 'Template not found' }); return; }
+
+    const profile = await BusinessProfile.findById(template.businessProfileId);
+    if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+      socket.emit('tasker_error', { error: 'Only owner or admin can edit templates' });
+      return;
+    }
+
+    const allowed = ['name', 'description', 'columns', 'requiresApproval',
+                     'allowMultipleSubmissions', 'submissionFrequency'];
+    for (const field of allowed) {
+      if (updates[field] !== undefined) template[field] = updates[field];
+    }
+    template.updatedAt = new Date();
+    await template.save();
+
+    const formatted = formatReportTemplate(template);
+    socket.emit('report_template_updated', { success: true, template: formatted });
+
+    const project = await Project.findById(template.projectId);
+    if (project) {
+      await broadcastToProject(project, 'report_template_updated', { template: formatted });
+    }
+  } catch (error) {
+    err('update_report_template failed:', error);
+    socket.emit('tasker_error', { error: 'Failed to update template' });
+  }
+});
 
   // ==========================================
   // GET REPORT SUBMISSIONS

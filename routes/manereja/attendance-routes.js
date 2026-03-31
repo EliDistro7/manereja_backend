@@ -6,6 +6,7 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
+const { notifyProfileAdmins } = require('../../services/businessNotificationService');
 require('dotenv').config();
 
 const router = express.Router();
@@ -486,6 +487,25 @@ function calculateDistance(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
+
+// In attendance.js — add this helper
+function countExpectedWorkDays(startDate, endDate, workDays) {
+  let count = 0;
+  const current = new Date(startDate);
+  current.setHours(0, 0, 0, 0);
+  const end = new Date(endDate);
+  end.setHours(23, 59, 59, 999);
+
+  while (current <= end) {
+    // JS getDay(): 0=Sun,1=Mon...6=Sat → convert to your 1=Mon...7=Sun scheme
+    const jsDay = current.getDay();
+    const day = jsDay === 0 ? 7 : jsDay;
+    if (workDays.includes(day)) count++;
+    current.setDate(current.getDate() + 1);
+  }
+  return count;
+}
+
 /**
  * Calculate work duration in minutes
  * @param {Date} checkInTime - Check-in time
@@ -962,9 +982,7 @@ router.post('/check-in', authenticate, async (req, res) => {
       });
     }
     
-    console.log(`✅ Found workplace settings`);
-    console.log(`   Require biometric: ${settings.requireBiometric}`);
-    console.log(`   Require location: ${settings.requireLocationVerification}`);
+    
     
     // Check if today is a work day
     if (!settings.isWorkDay(today)) {
@@ -1000,10 +1018,7 @@ router.post('/check-in', authenticate, async (req, res) => {
       
       isAtWorkplace = distanceFromWorkplace <= settings.allowedRadius;
       
-      console.log(`📍 Location verification:`);
-      console.log(`   Distance: ${distanceFromWorkplace.toFixed(2)} km`);
-      console.log(`   Allowed: ${settings.allowedRadius} km`);
-      console.log(`   At workplace: ${isAtWorkplace}`);
+
       
       if (!isAtWorkplace) {
         console.log('❌ Too far from workplace');
@@ -1126,11 +1141,26 @@ router.post('/check-in', authenticate, async (req, res) => {
     });
     
     await attendance.save();
+
+    await notifyProfileAdmins(businessProfileId, {
+  title:    `${employeeName} checked in`,
+  body:     isLate
+    ? `${employeeName} checked in ${formatDuration(lateBy)} late.`
+    : `${employeeName} checked in on time.`,
+  type:     'alert',
+  priority: isLate ? 'high' : 'normal',
+  metadata: {
+    event:        'check_in',
+    employeeId,
+    employeeName,
+    attendanceId: attendance._id.toString(),
+    isLate,
+    lateBy,
+    businessProfileId,
+  },
+});
     
-    console.log('✅ ✅ ✅ CHECK-IN SUCCESSFUL ✅ ✅ ✅');
-    console.log(`   Attendance ID: ${attendance._id}`);
-    console.log(`   Status: ${status}`);
-    console.log(`   Verified: ${biometricVerified || isVerified}`);
+  
     
     // Populate location before sending response
     await attendance.populate('checkInLocation');
@@ -1376,6 +1406,22 @@ router.put('/check-out/:attendanceId', authenticate, async (req, res) => {
     }
     
     await attendance.save();
+    await notifyProfileAdmins(attendance.businessProfileId, {
+  title:    `${attendance.employeeName} checked out`,
+  body:     `${attendance.employeeName} worked ${formatDuration(workDuration)}.`
+    + (isEarlyDeparture ? ' Early departure.' : ''),
+  type:     'alert',
+  priority: isEarlyDeparture ? 'high' : 'normal',
+  metadata: {
+    event:        'check_out',
+    employeeId:   attendance.employeeId,
+    employeeName: attendance.employeeName,
+    attendanceId: attendance._id.toString(),
+    workDuration,
+    isEarlyDeparture,
+    businessProfileId: attendance.businessProfileId,
+  },
+});
     
     // Populate locations
     await attendance.populate('checkInLocation checkOutLocation');
@@ -1618,14 +1664,28 @@ router.get('/employee/:employeeId/history', authenticate, async (req, res) => {
     
     // Calculate employee stats
     const allAttendances = await Attendance.find(query);
+
+    const settings = await WorkplaceSettings.findOne({ businessProfileId });
+const workDays = settings?.workDays ?? [1,2,3,4,5,6];
+
+const expectedDays = countExpectedWorkDays(
+  query.checkInTime?.$gte ?? new Date(Date.now() - 30*86400000),
+  query.checkInTime?.$lte ?? new Date(),
+  workDays
+);
     
     const stats = {
       totalDays: allAttendances.length,
-      lateDays: allAttendances.filter(a => a.isLate).length,
-      onTimeDays: allAttendances.filter(a => !a.isLate).length,
-      totalWorkHours: Math.round(
-        allAttendances.reduce((sum, a) => sum + (a.workDuration || 0), 0) / 60
-      ),
+  expectedWorkDays: expectedDays,           // NEW
+  absentDays: expectedDays - allAttendances.length, // NEW
+  lateDays: allAttendances.filter(a => a.isLate).length,
+  onTimeDays: allAttendances.filter(a => !a.isLate).length,
+  punctualityRate: expectedDays > 0          // FIXED
+    ? Math.round((allAttendances.filter(a => !a.isLate).length / expectedDays) * 100)
+    : 0,
+  attendanceRate: expectedDays > 0           // NEW
+    ? Math.round((allAttendances.length / expectedDays) * 100)
+    : 0,
       averageWorkDuration: allAttendances.length > 0
         ? formatDuration(Math.round(
             allAttendances.reduce((sum, a) => sum + (a.workDuration || 0), 0) / 
@@ -2035,95 +2095,146 @@ router.delete('/workplace-settings/:businessProfileId', authenticate, verifyBusi
 // ANALYTICS & REPORTS ROUTES
 // ============================================
 
-/**
- * Get attendance statistics for a business profile
- * GET /api/attendance/stats/:businessProfileId?startDate=...&endDate=...&employeeId=...
- */
+
+
+// ============================================
+// HELPER — add once near the top of the file
+// ============================================
+
+function countExpectedWorkDays(startDate, endDate, workDays) {
+  let count = 0;
+  const current = new Date(startDate);
+  current.setHours(0, 0, 0, 0);
+  const end = new Date(endDate);
+  end.setHours(23, 59, 59, 999);
+
+  while (current <= end) {
+    const jsDay = current.getDay();
+    const day = jsDay === 0 ? 7 : jsDay; // convert Sun(0) → 7, Mon(1)→1 ... Sat(6)→6
+    if (workDays.includes(day)) count++;
+    current.setDate(current.getDate() + 1);
+  }
+  return count;
+}
+
+// ============================================
+// GET /stats/:businessProfileId
+// ============================================
+
 router.get('/stats/:businessProfileId', authenticate, verifyBusinessAccess, async (req, res) => {
   try {
     const { businessProfileId } = req.params;
     const { startDate, endDate, employeeId } = req.query;
-    
+
     const query = { businessProfileId };
-    
+
     if (startDate && endDate) {
       query.checkInTime = {
         $gte: new Date(startDate),
         $lte: new Date(endDate)
       };
     }
-    
+
     if (employeeId) {
       query.employeeId = employeeId;
     }
-    
-    const attendances = await Attendance.find(query);
-    
+
+    // Fetch attendance records and workplace settings in parallel
+    const [attendances, settings] = await Promise.all([
+      Attendance.find(query),
+      WorkplaceSettings.findOne({ businessProfileId })
+    ]);
+
+    const workDays = settings?.workDays ?? [1, 2, 3, 4, 5, 6];
+
+    // Calculate expected work days for the requested range
+    const rangeStart = startDate ? new Date(startDate) : null;
+    const rangeEnd   = endDate   ? new Date(endDate)   : null;
+    const expectedWorkDays = (rangeStart && rangeEnd)
+      ? countExpectedWorkDays(rangeStart, rangeEnd, workDays)
+      : null; // null = "no range provided, can't compute"
+
+    const onTimeDays = attendances.filter(a => !a.isLate).length;
+    const presentDays = attendances.length;
+    const lateDays = attendances.filter(a => a.isLate).length;
+
     const stats = {
-      totalRecords: attendances.length,
+      totalRecords: presentDays,
+      expectedWorkDays,                        // NEW — null if no date range given
+      absentDays: expectedWorkDays !== null
+        ? Math.max(0, expectedWorkDays - presentDays)
+        : null,                                // NEW
+      attendanceRate: expectedWorkDays
+        ? Math.round((presentDays / expectedWorkDays) * 100)
+        : null,                                // NEW
+
       byStatus: {
-        checkedIn: attendances.filter(a => a.status === 'checkedIn').length,
-        checkedOut: attendances.filter(a => a.status === 'checkedOut').length,
-        late: attendances.filter(a => a.status === 'late').length,
+        checkedIn:      attendances.filter(a => a.status === 'checkedIn').length,
+        checkedOut:     attendances.filter(a => a.status === 'checkedOut').length,
+        late:           attendances.filter(a => a.status === 'late').length,
         earlyDeparture: attendances.filter(a => a.status === 'earlyDeparture').length,
-        absent: attendances.filter(a => a.status === 'absent').length
+        absent:         attendances.filter(a => a.status === 'absent').length
       },
+
       timing: {
-        onTime: attendances.filter(a => !a.isLate).length,
-        late: attendances.filter(a => a.isLate).length,
-        punctualityRate: attendances.length > 0
-          ? Math.round((attendances.filter(a => !a.isLate).length / attendances.length) * 100)
-          : 0,
-        averageLateMinutes: attendances.filter(a => a.isLate).length > 0
+        onTime: onTimeDays,
+        late:   lateDays,
+        // FIXED: denominator is expectedWorkDays, not attendances.length
+        punctualityRate: expectedWorkDays
+          ? Math.round((onTimeDays / expectedWorkDays) * 100)
+          : (presentDays > 0 ? Math.round((onTimeDays / presentDays) * 100) : 0),
+        averageLateMinutes: lateDays > 0
           ? Math.round(
               attendances.filter(a => a.isLate)
-                .reduce((sum, a) => sum + (a.lateBy || 0), 0) / 
-              attendances.filter(a => a.isLate).length
+                .reduce((sum, a) => sum + (a.lateBy || 0), 0) / lateDays
             )
           : 0,
-        averageLateTime: attendances.filter(a => a.isLate).length > 0
+        averageLateTime: lateDays > 0
           ? formatDuration(Math.round(
               attendances.filter(a => a.isLate)
-                .reduce((sum, a) => sum + (a.lateBy || 0), 0) / 
-              attendances.filter(a => a.isLate).length
+                .reduce((sum, a) => sum + (a.lateBy || 0), 0) / lateDays
             ))
           : '0m'
       },
+
       location: {
-        atWorkplace: attendances.filter(a => a.isAtWorkplace).length,
-        remote: attendances.filter(a => !a.isAtWorkplace).length,
-        workplaceRate: attendances.length > 0
-          ? Math.round((attendances.filter(a => a.isAtWorkplace).length / attendances.length) * 100)
+        atWorkplace:   attendances.filter(a => a.isAtWorkplace).length,
+        remote:        attendances.filter(a => !a.isAtWorkplace).length,
+        workplaceRate: presentDays > 0
+          ? Math.round((attendances.filter(a => a.isAtWorkplace).length / presentDays) * 100)
           : 0
+        // Note: workplaceRate stays relative to present days (days they showed up),
+        // not expectedWorkDays — a fair measure of compliance when present
       },
+
       workDuration: {
         totalMinutes: attendances.reduce((sum, a) => sum + (a.workDuration || 0), 0),
-        totalHours: Math.round(attendances.reduce((sum, a) => sum + (a.workDuration || 0), 0) / 60),
-        averageMinutes: attendances.length > 0
-          ? Math.round(attendances.reduce((sum, a) => sum + (a.workDuration || 0), 0) / attendances.length)
+        totalHours:   Math.round(attendances.reduce((sum, a) => sum + (a.workDuration || 0), 0) / 60),
+        averageMinutes: presentDays > 0
+          ? Math.round(attendances.reduce((sum, a) => sum + (a.workDuration || 0), 0) / presentDays)
           : 0,
-        averageDuration: attendances.length > 0
-          ? formatDuration(Math.round(attendances.reduce((sum, a) => sum + (a.workDuration || 0), 0) / attendances.length))
+        averageDuration: presentDays > 0
+          ? formatDuration(Math.round(
+              attendances.reduce((sum, a) => sum + (a.workDuration || 0), 0) / presentDays
+            ))
           : '0m'
       },
+
       verification: {
         fingerprint: attendances.filter(a => a.checkInMethod === 'fingerprint').length,
-        faceId: attendances.filter(a => a.checkInMethod === 'faceId').length,
-        pin: attendances.filter(a => a.checkInMethod === 'pin').length,
-        manual: attendances.filter(a => a.checkInMethod === 'manual').length,
-        verified: attendances.filter(a => a.isCheckInVerified).length,
-        verificationRate: attendances.length > 0
-          ? Math.round((attendances.filter(a => a.isCheckInVerified).length / attendances.length) * 100)
+        faceId:      attendances.filter(a => a.checkInMethod === 'faceId').length,
+        pin:         attendances.filter(a => a.checkInMethod === 'pin').length,
+        manual:      attendances.filter(a => a.checkInMethod === 'manual').length,
+        verified:    attendances.filter(a => a.isCheckInVerified).length,
+        verificationRate: presentDays > 0
+          ? Math.round((attendances.filter(a => a.isCheckInVerified).length / presentDays) * 100)
           : 0
       }
     };
-    
-    res.json({ 
+
+    res.json({
       stats,
-      dateRange: startDate && endDate ? {
-        start: startDate,
-        end: endDate
-      } : null,
+      dateRange: rangeStart && rangeEnd ? { start: startDate, end: endDate } : null,
       employeeId: employeeId || 'all'
     });
   } catch (error) {
@@ -2132,84 +2243,103 @@ router.get('/stats/:businessProfileId', authenticate, verifyBusinessAccess, asyn
   }
 });
 
-/**
- * Get attendance summary by employee
- * GET /api/attendance/summary/:businessProfileId?startDate=...&endDate=...
- */
+// ============================================
+// GET /summary/:businessProfileId
+// ============================================
+
 router.get('/summary/:businessProfileId', authenticate, verifyBusinessAccess, async (req, res) => {
   try {
     const { businessProfileId } = req.params;
     const { startDate, endDate } = req.query;
-    
+
     const query = { businessProfileId };
-    
+
     if (startDate && endDate) {
       query.checkInTime = {
         $gte: new Date(startDate),
         $lte: new Date(endDate)
       };
     }
-    
-    const attendances = await Attendance.find(query);
-    
+
+    // Fetch attendance records and workplace settings in parallel
+    const [attendances, settings] = await Promise.all([
+      Attendance.find(query),
+      WorkplaceSettings.findOne({ businessProfileId })
+    ]);
+
+    const workDays = settings?.workDays ?? [1, 2, 3, 4, 5, 6];
+
+    const rangeStart = startDate ? new Date(startDate) : null;
+    const rangeEnd   = endDate   ? new Date(endDate)   : null;
+    const expectedWorkDays = (rangeStart && rangeEnd)
+      ? countExpectedWorkDays(rangeStart, rangeEnd, workDays)
+      : null;
+
     // Group by employee
     const employeeSummary = {};
-    
+
     attendances.forEach(attendance => {
       if (!employeeSummary[attendance.employeeId]) {
         employeeSummary[attendance.employeeId] = {
-          employeeId: attendance.employeeId,
-          employeeName: attendance.employeeName,
-          totalDays: 0,
-          presentDays: 0,
-          lateDays: 0,
-          onTimeDays: 0,
+          employeeId:       attendance.employeeId,
+          employeeName:     attendance.employeeName,
+          expectedWorkDays,                    // NEW — same for all employees in this range
+          presentDays:      0,
+          absentDays:       0,                 // NEW — calculated after grouping
+          lateDays:         0,
+          onTimeDays:       0,
           totalWorkMinutes: 0,
-          averageWorkMinutes: 0,
-          averageWorkDuration: '0m',
-          punctualityRate: 0
+          averageWorkMinutes:   0,
+          averageWorkDuration:  '0m',
+          totalWorkHours:       0,
+          punctualityRate:      0,
+          attendanceRate:       0              // NEW
         };
       }
-      
-      const summary = employeeSummary[attendance.employeeId];
-      summary.totalDays++;
-      
-      if (attendance.status !== 'absent') {
-        summary.presentDays++;
-      }
-      
+
+      const s = employeeSummary[attendance.employeeId];
+      s.presentDays++;
+
       if (attendance.isLate) {
-        summary.lateDays++;
+        s.lateDays++;
       } else {
-        summary.onTimeDays++;
+        s.onTimeDays++;
       }
-      
-      summary.totalWorkMinutes += attendance.workDuration || 0;
+
+      s.totalWorkMinutes += attendance.workDuration || 0;
     });
-    
-    // Calculate averages and rates
-    Object.values(employeeSummary).forEach(summary => {
-      summary.averageWorkMinutes = summary.totalDays > 0
-        ? Math.round(summary.totalWorkMinutes / summary.totalDays)
+
+    // Calculate derived fields for each employee
+    Object.values(employeeSummary).forEach(s => {
+      s.absentDays = expectedWorkDays !== null
+        ? Math.max(0, expectedWorkDays - s.presentDays)
+        : null;
+
+      s.attendanceRate = expectedWorkDays
+        ? Math.round((s.presentDays / expectedWorkDays) * 100)
+        : null;
+
+      // FIXED: punctualityRate denominator is expectedWorkDays
+      s.punctualityRate = expectedWorkDays
+        ? Math.round((s.onTimeDays / expectedWorkDays) * 100)
+        : (s.presentDays > 0 ? Math.round((s.onTimeDays / s.presentDays) * 100) : 0);
+
+      s.averageWorkMinutes = s.presentDays > 0
+        ? Math.round(s.totalWorkMinutes / s.presentDays)
         : 0;
-      summary.averageWorkDuration = formatDuration(summary.averageWorkMinutes);
-      summary.punctualityRate = summary.totalDays > 0
-        ? Math.round((summary.onTimeDays / summary.totalDays) * 100)
-        : 0;
-      summary.totalWorkHours = Math.round(summary.totalWorkMinutes / 60);
+      s.averageWorkDuration = formatDuration(s.averageWorkMinutes);
+      s.totalWorkHours = Math.round(s.totalWorkMinutes / 60);
     });
-    
-    res.json({ 
+
+    res.json({
       summary: Object.values(employeeSummary),
+      expectedWorkDays,                        // NEW — top-level for convenience
       totalEmployees: Object.keys(employeeSummary).length,
-      dateRange: startDate && endDate ? {
-        start: startDate,
-        end: endDate
-      } : null
+      dateRange: rangeStart && rangeEnd ? { start: startDate, end: endDate } : null
     });
   } catch (error) {
     console.error('Error fetching attendance summary:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ message: 'Server error' })
   }
 });
 

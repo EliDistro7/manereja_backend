@@ -18,6 +18,10 @@ const User   = require("../../models/manereja/user");
 const { Package, UserPackageSubscription } = require("../../models/manereja/package");
 const adminEmail = require("../../services/adminEmailService");
 
+// Add these two imports at the top with the others:
+const SystemNotification = require("../../models/manereja/SystemNotification");
+const { getIo }          = require("../../socket/base");
+
 const JWT_SECRET    = process.env.ADMIN_JWT_SECRET || process.env.JWT_SECRET;
 const JWT_EXPIRES   = process.env.ADMIN_JWT_EXPIRES_IN || "7d";
 
@@ -38,7 +42,10 @@ const fmtDate = (d) => (d ? new Date(d).toLocaleDateString("en-TZ", { dateStyle:
 exports.login = async (req, res) => {
   try {
     const { email, password } = req.body;
-    if (!email || !password) return fail(res, "Email and password are required.", 400);
+    if (!email || !password) {
+      console.log('Admin login failed: Missing email or password');
+      return fail(res, "Email and password are required.", 400);
+    }
 
     const admin = await Admin.findOne({ email });
     if (!admin || !admin.isActive)  return fail(res, "Invalid credentials.", 401);
@@ -623,34 +630,109 @@ exports.sendTrialUpgradePrompt = async (req, res) => {
 // SYSTEM NOTIFICATIONS
 // ═════════════════════════════════════════════════════════════════════════════
 
-/** POST /api/admin/system-notifications */
+/** POST /auth/system-notifications */
 exports.createNotification = async (req, res) => {
   try {
-    // Replace stub with: const notif = await SystemNotification.create({ ...req.body, createdBy: req.adminId });
+    if (!req.body.title || !req.body.body)
+      return fail(res, "title and body required.", 400);
+
+    const notif = await SystemNotification.create({
+      ...req.body,
+      expiresAt: req.body.expiresAt ? new Date(req.body.expiresAt) : null,
+      isActive:  true,
+    });
+
+    // Push via socket — same pattern as packageNotificationService._emitToUser
+    try {
+      const io      = getIo();
+      const payload = {
+        ...notif.toObject(),
+        id:     notif._id.toString(),
+        status: 'unread',
+      };
+
+      if (notif.targetUserIds?.length) {
+        // Targeted push — use userSockets map directly (same as packageNotificationService)
+        for (const uid of notif.targetUserIds) {
+          const sockets = userSockets[uid];
+          if (sockets) {
+            for (const sid of sockets) {
+              io.to(sid).emit('system_notification', payload);
+            }
+          }
+        }
+      } else {
+        // Broadcast to every connected client
+        io.emit('system_notification', payload);
+      }
+    } catch (socketErr) {
+      // Non-fatal — notification is saved even if socket push fails
+      console.warn('system_notification socket push skipped:', socketErr.message);
+    }
+
     await req.admin.logActivity("notifications:create", {
+      targetId:   notif._id,
       collection: "SystemNotification",
-      meta: { title: req.body.title, type: req.body.type },
+      meta: { title: notif.title, type: notif.type },
     }, req);
-    return ok(res, { message: "Notification queued." }, 201);
-  } catch (e) { return fail(res, "Server error."); }
+
+    return ok(res, { notification: notif }, 201);
+  } catch (e) {
+    console.error("createNotification:", e);
+    return fail(res, "Server error.");
+  }
 };
 
-/** GET /api/admin/system-notifications */
+/** GET /auth/system-notifications */
 exports.listNotifications = async (req, res) => {
   try {
-    // const notifs = await SystemNotification.find().sort({ createdAt: -1 });
-    return ok(res, { notifications: [] });
-  } catch (e) { return fail(res, "Server error."); }
+    const { type, priority, isActive, page = 1, limit = 50 } = req.query;
+
+    const filter = {};
+    if (type)                   filter.type     = type;
+    if (priority)               filter.priority = priority;
+    if (isActive !== undefined) filter.isActive = isActive === "true";
+
+    const [notifications, total] = await Promise.all([
+      SystemNotification.find(filter)
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(Number(limit)),
+      SystemNotification.countDocuments(filter),
+    ]);
+
+    return ok(res, { notifications, total });
+  } catch (e) {
+    console.error("listNotifications:", e);
+    return fail(res, "Server error.");
+  }
 };
 
-/** DELETE /api/admin/system-notifications/:id */
+/** DELETE /auth/system-notifications/:id */
 exports.deleteNotification = async (req, res) => {
   try {
-    // await SystemNotification.findByIdAndDelete(req.params.id);
-    await req.admin.logActivity("notifications:delete", { targetId: req.params.id, collection: "SystemNotification" }, req);
+    const notif = await SystemNotification.findByIdAndDelete(req.params.id);
+    if (!notif) return fail(res, "Notification not found.", 404);
+
+    try {
+      const io = getIo();
+      io.emit('system_notification_deleted', { notificationId: req.params.id });
+    } catch (socketErr) {
+      console.warn('system_notification_deleted socket push skipped:', socketErr.message);
+    }
+
+    await req.admin.logActivity("notifications:delete", {
+      targetId:   req.params.id,
+      collection: "SystemNotification",
+    }, req);
+
     return ok(res, { message: "Notification deleted." });
-  } catch (e) { return fail(res, "Server error."); }
+  } catch (e) {
+    console.error("deleteNotification:", e);
+    return fail(res, "Server error.");
+  }
 };
+
 
 // ═════════════════════════════════════════════════════════════════════════════
 // ANALYTICS
