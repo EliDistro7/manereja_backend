@@ -3,40 +3,44 @@ const express = require('express');
 const router = express.Router();
 const SystemNotification = require('../../models/manereja/SystemNotification');
 const UserNotificationState = require('../../models/manereja/UserNotificationState');
-const {authenticateToken} = require('../../middleware/auth');
+const { authenticateToken } = require('../../middleware/auth');
 
 // ── GET /api/system-notifications ──────────────────────────────────────────
-// Returns all active notifications for current user with their read state merged
 router.get('/', authenticateToken, async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId   = req.user.id;
     const userRole = req.user.role;
+    const now      = new Date();
 
-    const now = new Date();
+    const notifications = await SystemNotification.find({
+      isActive: true,
+      $and: [
+        // Expiry gate
+        { $or: [{ expiresAt: null }, { expiresAt: { $gt: now } }] },
 
-    // Find notifications targeted at this user or broadcast
-  const notifications = await SystemNotification.find({
-  isActive: true,
-  $and: [
-    // Expiry check
-    { $or: [{ expiresAt: null }, { expiresAt: { $gt: now } }] },
-    // Targeting check
-    {
-      $or: [
-        { targetUserIds: null },
-        { targetUserIds: { $size: 0 } },  // empty array = broadcast
-        { targetUserIds: userId },
-        { targetRoles: null },
-        { targetRoles: { $size: 0 } },
-        { targetRoles: userRole },
+        // userId gate — must pass independently
+        {
+          $or: [
+            { targetUserIds: null },
+            { targetUserIds: { $size: 0 } },
+            { targetUserIds: { $in: [userId] } },
+          ],
+        },
+
+        // role gate — must also pass independently
+        {
+          $or: [
+            { targetRoles: null },
+            { targetRoles: { $size: 0 } },
+            { targetRoles: { $in: [userRole] } },
+          ],
+        },
       ],
-    },
-  ],
-}).sort({ createdAt: -1 });
+    }).sort({ createdAt: -1 });
 
-    // Fetch user's state for all these notifs
+    // Fetch this user's state records for matched notifications
     const notifIds = notifications.map(n => n._id);
-    const states = await UserNotificationState.find({
+    const states   = await UserNotificationState.find({
       userId,
       notificationId: { $in: notifIds },
     });
@@ -44,32 +48,31 @@ router.get('/', authenticateToken, async (req, res) => {
     const stateMap = {};
     states.forEach(s => { stateMap[s.notificationId.toString()] = s; });
 
-    // Merge
     const merged = notifications.map(n => {
       const state = stateMap[n._id.toString()];
       return {
-        id: n._id.toString(),
-        _id: n._id.toString(),
-        title: n.title,
-        body: n.body,
-        imageUrl: n.imageUrl,
-        type: n.type,
-        priority: n.priority,
+        id:               n._id.toString(),
+        _id:              n._id.toString(),
+        title:            n.title,
+        body:             n.body,
+        imageUrl:         n.imageUrl,
+        type:             n.type,
+        priority:         n.priority,
         changelogVersion: n.changelogVersion,
-        bulletPoints: n.bulletPoints,
-        actions: n.actions,
+        bulletPoints:     n.bulletPoints,
+        actions:          n.actions,
         feedbackQuestion: n.feedbackQuestion,
-        expiresAt: n.expiresAt,
-        metadata: n.metadata,
-        createdAt: n.createdAt,
-        updatedAt: n.updatedAt,
+        expiresAt:        n.expiresAt,
+        metadata:         n.metadata,
+        createdAt:        n.createdAt,
+        updatedAt:        n.updatedAt,
         // Per-user state
-        status:          state?.status ?? 'unread',
-        feedbackRating:  state?.feedbackRating ?? null,
-        feedbackComment: state?.feedbackComment ?? null,
-        readAt:          state?.readAt ?? null,
-        dismissedAt:     state?.dismissedAt ?? null,
-        actionTakenAt:   state?.actionTakenAt ?? null,
+        status:           state?.status          ?? 'unread',
+        feedbackRating:   state?.feedbackRating  ?? null,
+        feedbackComment:  state?.feedbackComment ?? null,
+        readAt:           state?.readAt          ?? null,
+        dismissedAt:      state?.dismissedAt     ?? null,
+        actionTakenAt:    state?.actionTakenAt   ?? null,
       };
     });
 
@@ -90,18 +93,43 @@ router.patch('/:id/read', authenticateToken, async (req, res) => {
     );
     res.json({ success: true });
   } catch (err) {
+    console.error('PATCH /:id/read error:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
 // ── PATCH /api/system-notifications/read-all ───────────────────────────────
+// NOTE: this route must be defined BEFORE /:id routes to avoid Express
+// matching "read-all" as an :id param.
 router.patch('/read-all', authenticateToken, async (req, res) => {
   try {
-    const userId = req.user.id;
-    const now = new Date();
+    const userId   = req.user.id;
+    const userRole = req.user.role;
+    const now      = new Date();
 
-    const all = await SystemNotification.find({ isActive: true }).select('_id');
-    const ids = all.map(n => n._id);
+    // Only mark notifications this user can actually see (same targeting rules)
+    const visible = await SystemNotification.find({
+      isActive: true,
+      $and: [
+        { $or: [{ expiresAt: null }, { expiresAt: { $gt: now } }] },
+        {
+          $or: [
+            { targetUserIds: null },
+            { targetUserIds: { $size: 0 } },
+            { targetUserIds: { $in: [userId] } },
+          ],
+        },
+        {
+          $or: [
+            { targetRoles: null },
+            { targetRoles: { $size: 0 } },
+            { targetRoles: { $in: [userRole] } },
+          ],
+        },
+      ],
+    }).select('_id');
+
+    const ids = visible.map(n => n._id);
 
     await Promise.all(ids.map(nId =>
       UserNotificationState.findOneAndUpdate(
@@ -113,6 +141,7 @@ router.patch('/read-all', authenticateToken, async (req, res) => {
 
     res.json({ success: true });
   } catch (err) {
+    console.error('PATCH /read-all error:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -127,6 +156,7 @@ router.patch('/:id/dismiss', authenticateToken, async (req, res) => {
     );
     res.json({ success: true });
   } catch (err) {
+    console.error('PATCH /:id/dismiss error:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -143,45 +173,71 @@ router.post('/:id/feedback', authenticateToken, async (req, res) => {
     await UserNotificationState.findOneAndUpdate(
       { userId: req.user.id, notificationId: req.params.id },
       {
-        status: 'actionTaken',
-        feedbackRating: rating,
+        status:          'actionTaken',
+        feedbackRating:  rating,
         feedbackComment: comment ?? null,
-        actionTakenAt: new Date(),
+        actionTakenAt:   new Date(),
       },
       { upsert: true, new: true },
     );
 
     res.json({ success: true, message: 'Feedback recorded' });
   } catch (err) {
+    console.error('POST /:id/feedback error:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
 // ── ADMIN: POST /api/system-notifications ──────────────────────────────────
-// Create and broadcast a new notification (add admin guard in production)
 router.post('/', authenticateToken, async (req, res) => {
   try {
     const notification = new SystemNotification(req.body);
     await notification.save();
 
-    // Emit socket event — pass io via req.app
-    const io = req.app.get('io');
-    if (io) {
-      const payload = { ...notification.toObject(), id: notification._id.toString(), status: 'unread' };
+    const io          = req.app.get('io');
+    const userSockets = req.app.get('userSockets'); // Map<userId, Set<socketId>>
 
-      if (notification.targetUserIds?.length) {
-        // Target specific users
+    if (io) {
+      const payload = {
+        ...notification.toObject(),
+        id:     notification._id.toString(),
+        status: 'unread',
+      };
+
+      const hasUserTarget = notification.targetUserIds?.length > 0;
+      const hasRoleTarget = notification.targetRoles?.length > 0;
+
+      if (!hasUserTarget && !hasRoleTarget) {
+        // Pure broadcast — no targeting on either field
+        io.emit('system_notification', payload);
+
+      } else if (hasUserTarget && !hasRoleTarget) {
+        // Target specific user IDs only
         notification.targetUserIds.forEach(uid => {
-          const sockets = req.app.get('userSockets')?.[uid];
+          const sockets = userSockets?.[uid];
           if (sockets) {
             for (const sid of sockets) {
               io.to(sid).emit('system_notification', payload);
             }
           }
         });
+
+      } else if (hasRoleTarget && !hasUserTarget) {
+        // Target by role — use Socket.io rooms (requires clients to join a room named after their role on connect)
+        notification.targetRoles.forEach(role => {
+          io.to(`role:${role}`).emit('system_notification', payload);
+        });
+
       } else {
-        // Broadcast to all
-        io.emit('system_notification', payload);
+        // Both fields set — intersection: user must be in targetUserIds AND have a targeted role
+        notification.targetUserIds.forEach(uid => {
+          const sockets = userSockets?.[uid];
+          if (sockets) {
+            for (const sid of sockets) {
+              io.to(sid).emit('system_notification', payload);
+            }
+          }
+        });
       }
     }
 
@@ -195,7 +251,12 @@ router.post('/', authenticateToken, async (req, res) => {
 // ── ADMIN: DELETE /api/system-notifications/:id ────────────────────────────
 router.delete('/:id', authenticateToken, async (req, res) => {
   try {
-    await SystemNotification.findByIdAndUpdate(req.params.id, { isActive: false });
+    const notif = await SystemNotification.findByIdAndUpdate(
+      req.params.id,
+      { isActive: false },
+      { new: true },
+    );
+    if (!notif) return res.status(404).json({ success: false, message: 'Notification not found.' });
 
     const io = req.app.get('io');
     if (io) {
@@ -204,6 +265,7 @@ router.delete('/:id', authenticateToken, async (req, res) => {
 
     res.json({ success: true });
   } catch (err) {
+    console.error('DELETE /:id error:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });

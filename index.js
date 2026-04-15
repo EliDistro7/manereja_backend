@@ -33,6 +33,9 @@ const emailRoutes= require('./routes/manereja/email-routes.js');
 const authEmailRoutes = require('./routes/manereja/auth_email.js');
 const seedAdmin = require('./models/manereja/seed_admin.js');
 const adminRoutes = require('./routes/manereja/admin-routes.js');
+
+const rowFlagRoutes   = require('./routes/manereja/rowFlag-routes');
+const startRowFlagCron = require('./jobs/rowFlagCron');
 const { userSockets } = require('./socket/base');
 //require('./cron/expireSubscriptions');
 
@@ -105,15 +108,23 @@ mongoose.connect(process.env.MONGO_URL, {
    // TanzaniaSeed.seedTanzaniaLocations();
 //PackagesSeed.seedPackages();
     //seedAdmin();
+
+        const io = initSocket(server);
+    app.set('io', io);
+    app.set('userSockets', userSockets);
+
+    startRowFlagCron(app); // ✅ DB is ready, sockets are ready
+
+    server.listen(PORT, '0.0.0.0', () => {
+      console.log(`Server started on port ${PORT}`);
+    });
 })
 .catch((err) => {
-    console.log("NOT CONNECTED TO NETWORK", err);
+    console.log("NOT CONNECTED TO NETWORK", err)
 });
 
-// Initialize Socket.IO
-const io = initSocket(server);
-app.set('io', io);
-app.set('userSockets', userSockets);
+
+
 // Routes
 app.use('/auth', adminRoutes);
 app.use('/auth/agents', agentsRouter);
@@ -135,12 +146,8 @@ app.use('/emails', emailRoutes);
 
 app.use('/api/system-notifications', systemNotificationRoutes);
 
+app.use('/api/row-flags', rowFlagRoutes);
+
 app.use('/api/emails',authEmailRoutes);
 
 
-// Start the server - IMPORTANT: bind to all interfaces
-server.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server started at port no. ${PORT} on all interfaces`);
-    console.log(`Local access: http://localhost:${PORT}`);
-    console.log(`Network access: http://192.168.0.72:${PORT}`);
-});

@@ -65,6 +65,12 @@ const reportTemplateSchema = new mongoose.Schema({
     type: String,
     trim: true,
   },
+
+    reportType: {
+    type: String,
+    enum: ['operational', 'outcome_based'],
+    default: 'operational',
+  },
   
   columns: {
     type: [reportTemplateColumnSchema],
@@ -100,7 +106,10 @@ const reportTemplateSchema = new mongoose.Schema({
   deletedAt: {
     type: Date,
   },
-}, {
+}, 
+
+
+{
   timestamps: true,
 });
 

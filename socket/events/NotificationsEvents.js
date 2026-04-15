@@ -1,5 +1,5 @@
 const Notification = require("../../models/NotificationsSchema.js");
-const User = require("../../models/userSchema.js");
+const User = require("../../models/manereja/user.js");
 const Event = require("../../models/eventSchema.js");
 
 module.exports = function notificationEvents(io, socket, userSockets, roomSocketsMap, socketToUser) {

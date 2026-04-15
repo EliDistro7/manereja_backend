@@ -1,4 +1,3 @@
-
 const mongoose = require("mongoose");
 
 // ✅ Package Feature Schema
@@ -69,6 +68,17 @@ const PackageSchema = new mongoose.Schema({
       type: String,
       enum: ['monthly', 'annual'],
       default: 'monthly'
+    },
+    // Extra user pricing: base package includes up to limits.maxUsers employees.
+    // Each additional user above that limit is charged extraUserRate per month.
+    extraUserRate: {
+      type: Number,
+      default: 0,   // 0 means no extra charge
+      min: 0
+    },
+    extraUserRateCurrency: {
+      type: String,
+      default: 'TZS'
     }
   },
   
@@ -117,7 +127,7 @@ const PackageSchema = new mongoose.Schema({
   limits: {
     maxUsers: {
       type: Number,
-      default: null // null means unlimited
+      default: null // null means unlimited; set to 10 for base plans
     },
     maxTransactions: {
       type: Number,
@@ -199,6 +209,13 @@ const UserPackageSubscriptionSchema = new mongoose.Schema({
   totalPaid: {
     type: Number,
     default: 0
+  },
+
+  // Extra users above the package's maxUsers limit
+  extraUsers: {
+    type: Number,
+    default: 0,
+    min: 0
   },
   
   // Auto-renewal
@@ -285,6 +302,19 @@ PackageSchema.methods.getAnnualPrice = function() {
   return this.price.amount;
 };
 
+/**
+ * Calculate total monthly charge for a subscription, factoring in extra users.
+ * @param {number} totalUsers - total number of users/employees on the subscription
+ * @returns {number} total amount due for the month in the package's currency
+ */
+PackageSchema.methods.calculateMonthlyCharge = function(totalUsers = 0) {
+  const base = this.getMonthlyPrice();
+  const includedUsers = this.limits.maxUsers ?? Infinity;
+  const extraUsers = Math.max(0, totalUsers - includedUsers);
+  const extraCharge = extraUsers * (this.price.extraUserRate ?? 0);
+  return base + extraCharge;
+};
+
 // ✅ UserPackageSubscription Methods
 UserPackageSubscriptionSchema.methods.isActive = function() {
   const now = new Date();
@@ -300,6 +330,20 @@ UserPackageSubscriptionSchema.methods.getRemainingDays = function() {
   const timeDiff = this.expiryDate.getTime() - now.getTime();
   const daysDiff = Math.ceil(timeDiff / (1000 * 3600 * 24));
   return Math.max(0, daysDiff);
+};
+
+/**
+ * Calculate the current monthly charge for this subscription,
+ * including any extra-user surcharge above the package's maxUsers limit.
+ * Requires the subscription to have its packageId populated.
+ */
+UserPackageSubscriptionSchema.methods.getCurrentMonthlyCharge = function() {
+  if (!this.packageId || typeof this.packageId.calculateMonthlyCharge !== 'function') {
+    throw new Error('packageId must be populated to calculate monthly charge');
+  }
+  const baseUsers = this.packageId.limits.maxUsers ?? Infinity;
+  const totalUsers = baseUsers + (this.extraUsers ?? 0);
+  return this.packageId.calculateMonthlyCharge(totalUsers);
 };
 
 UserPackageSubscriptionSchema.methods.renew = async function(durationInMonths = 1, paymentAmount = 0) {
@@ -356,7 +400,6 @@ UserPackageSubscriptionSchema.methods.recordLogin = async function() {
   return this;
 };
 
-// REPLACE the existing getActivePackages static:
 UserPackageSubscriptionSchema.statics.getActivePackages = async function(userId) {
   const now = new Date();
   
@@ -392,7 +435,7 @@ UserPackageSubscriptionSchema.statics.hasPackage = async function(userId, packag
          subscription.packageId.packageType === 'bundle';
 };
 
-// ✅ Static method to calculate total monthly revenue
+// ✅ Static method to calculate total monthly revenue (now accounts for extra users)
 UserPackageSubscriptionSchema.statics.calculateMonthlyRevenue = async function() {
   const activeSubscriptions = await this.find({
     status: 'active',
@@ -403,7 +446,7 @@ UserPackageSubscriptionSchema.statics.calculateMonthlyRevenue = async function()
   
   for (const sub of activeSubscriptions) {
     if (sub.packageId) {
-      totalRevenue += sub.packageId.getMonthlyPrice();
+      totalRevenue += sub.getCurrentMonthlyCharge();
     }
   }
   
@@ -427,11 +470,10 @@ UserPackageSubscriptionSchema.statics.calculateAgentCommissions = async function
   return totalCommission;
 };
 
-// REPLACE the existing pre-save hook:
 UserPackageSubscriptionSchema.pre('save', function(next) {
   const now = new Date();
   
-  // Auto-expire if past expiry date (all saves, not just updates)
+  // Auto-expire if past expiry date
   if ((this.status === 'active' || this.status === 'trial') && this.expiryDate <= now) {
     this.status = 'expired';
   }
