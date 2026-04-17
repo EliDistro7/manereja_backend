@@ -1,9 +1,11 @@
+
 // backend/routes/systemNotificationRoutes.js
 const express = require('express');
 const router = express.Router();
 const SystemNotification = require('../../models/manereja/SystemNotification');
 const UserNotificationState = require('../../models/manereja/UserNotificationState');
 const { authenticateToken } = require('../../middleware/auth');
+const { sendPushNotification } = require('../../services/pushNotificationService');
 
 // ── GET /api/system-notifications ──────────────────────────────────────────
 router.get('/', authenticateToken, async (req, res) => {

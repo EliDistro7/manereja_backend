@@ -4,9 +4,11 @@
 // Used by attendance check-in/out and report submission events.
 // Mirrors the socket emit pattern from packageNotificationService._emitToUser.
 
-const SystemNotification  = require('../models/manereja/SystemNotification');
-const BusinessProfile     = require('../models/manereja/business-profile');
+const SystemNotification     = require('../models/manereja/SystemNotification');
+const BusinessProfile        = require('../models/manereja/business-profile');
+const User                   = require('../models/manereja/user');
 const { getIo, userSockets } = require('../socket/base');
+const { sendPushNotification } = require('./pushNotificationService');
 
 /**
  * Push a real-time notification to every owner/admin of a business profile.
@@ -86,6 +88,31 @@ async function notifyProfileAdmins(businessProfileId, {
       console.warn('[businessNotif] socket push skipped:', socketErr.message);
     }
 
+    // ── 4. Push via FCM (works when app is closed/background) ────────────
+    try {
+      const users = await User.find({
+        _id:      { $in: recipientIds },
+        fcmToken: { $ne: null },
+      }).select('fcmToken');
+
+      await Promise.allSettled(users.map(u =>
+        sendPushNotification({
+          fcmToken: u.fcmToken,
+          title,
+          body,
+          data: {
+            type,
+            notificationId: notif?._id.toString() ?? '',
+            ...(metadata ? { metadata: JSON.stringify(metadata) } : {}),
+          },
+        })
+      ));
+
+      console.log(`[businessNotif] 📲 FCM push sent to ${users.length} device(s)`);
+    } catch (pushErr) {
+      console.warn('[businessNotif] FCM push failed (non-fatal):', pushErr.message);
+    }
+
     console.log(
       `[businessNotif] ✅ "${title}" → ${recipientIds.length} recipient(s) in profile ${businessProfileId}`
     );
@@ -94,5 +121,6 @@ async function notifyProfileAdmins(businessProfileId, {
     console.error('[businessNotif] notifyProfileAdmins error:', err);
   }
 }
+
 
 module.exports = { notifyProfileAdmins };

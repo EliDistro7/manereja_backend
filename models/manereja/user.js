@@ -72,6 +72,7 @@ const UserSchema = new mongoose.Schema({
     required: true,
     trim: true
   },
+  fcmToken: { type: String, default: null },
   profilePicture: { 
     type: String,
     default: null
