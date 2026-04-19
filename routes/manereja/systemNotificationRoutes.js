@@ -1,4 +1,3 @@
-
 // backend/routes/systemNotificationRoutes.js
 const express = require('express');
 const router = express.Router();
@@ -6,6 +5,7 @@ const SystemNotification = require('../../models/manereja/SystemNotification');
 const UserNotificationState = require('../../models/manereja/UserNotificationState');
 const { authenticateToken } = require('../../middleware/auth');
 const { sendPushNotification } = require('../../services/pushNotificationService');
+const User = require('../../models/manereja/user');
 
 // ── GET /api/system-notifications ──────────────────────────────────────────
 router.get('/', authenticateToken, async (req, res) => {
@@ -85,24 +85,8 @@ router.get('/', authenticateToken, async (req, res) => {
   }
 });
 
-// ── PATCH /api/system-notifications/:id/read ───────────────────────────────
-router.patch('/:id/read', authenticateToken, async (req, res) => {
-  try {
-    await UserNotificationState.findOneAndUpdate(
-      { userId: req.user.id, notificationId: req.params.id },
-      { status: 'read', readAt: new Date() },
-      { upsert: true, new: true },
-    );
-    res.json({ success: true });
-  } catch (err) {
-    console.error('PATCH /:id/read error:', err);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
 // ── PATCH /api/system-notifications/read-all ───────────────────────────────
-// NOTE: this route must be defined BEFORE /:id routes to avoid Express
-// matching "read-all" as an :id param.
+// NOTE: defined BEFORE /:id routes to avoid Express matching "read-all" as an :id param.
 router.patch('/read-all', authenticateToken, async (req, res) => {
   try {
     const userId   = req.user.id;
@@ -144,6 +128,21 @@ router.patch('/read-all', authenticateToken, async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error('PATCH /read-all error:', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ── PATCH /api/system-notifications/:id/read ───────────────────────────────
+router.patch('/:id/read', authenticateToken, async (req, res) => {
+  try {
+    await UserNotificationState.findOneAndUpdate(
+      { userId: req.user.id, notificationId: req.params.id },
+      { status: 'read', readAt: new Date() },
+      { upsert: true, new: true },
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error('PATCH /:id/read error:', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -199,6 +198,10 @@ router.post('/', authenticateToken, async (req, res) => {
     const io          = req.app.get('io');
     const userSockets = req.app.get('userSockets'); // Map<userId, Set<socketId>>
 
+    const hasUserTarget = notification.targetUserIds?.length > 0;
+    const hasRoleTarget = notification.targetRoles?.length > 0;
+
+    // ── Socket.io: real-time delivery for online users ──────────────────────
     if (io) {
       const payload = {
         ...notification.toObject(),
@@ -206,11 +209,8 @@ router.post('/', authenticateToken, async (req, res) => {
         status: 'unread',
       };
 
-      const hasUserTarget = notification.targetUserIds?.length > 0;
-      const hasRoleTarget = notification.targetRoles?.length > 0;
-
       if (!hasUserTarget && !hasRoleTarget) {
-        // Pure broadcast — no targeting on either field
+        // Pure broadcast
         io.emit('system_notification', payload);
 
       } else if (hasUserTarget && !hasRoleTarget) {
@@ -218,30 +218,66 @@ router.post('/', authenticateToken, async (req, res) => {
         notification.targetUserIds.forEach(uid => {
           const sockets = userSockets?.[uid];
           if (sockets) {
-            for (const sid of sockets) {
-              io.to(sid).emit('system_notification', payload);
-            }
+            for (const sid of sockets) io.to(sid).emit('system_notification', payload);
           }
         });
 
       } else if (hasRoleTarget && !hasUserTarget) {
-        // Target by role — use Socket.io rooms (requires clients to join a room named after their role on connect)
+        // Target by role via Socket.io rooms
         notification.targetRoles.forEach(role => {
           io.to(`role:${role}`).emit('system_notification', payload);
         });
 
       } else {
-        // Both fields set — intersection: user must be in targetUserIds AND have a targeted role
+        // Both set — send to targetUserIds (intersection enforced at DB query level)
         notification.targetUserIds.forEach(uid => {
           const sockets = userSockets?.[uid];
           if (sockets) {
-            for (const sid of sockets) {
-              io.to(sid).emit('system_notification', payload);
-            }
+            for (const sid of sockets) io.to(sid).emit('system_notification', payload);
           }
         });
       }
     }
+
+    // ── Push notifications: delivery for offline/backgrounded users ─────────
+    let userQuery = { fcmToken: { $ne: null } };
+
+    if (!hasUserTarget && !hasRoleTarget) {
+      // Broadcast — all users with an FCM token
+      // userQuery stays as-is
+
+    } else if (hasUserTarget && !hasRoleTarget) {
+      userQuery._id = { $in: notification.targetUserIds };
+
+    } else if (hasRoleTarget && !hasUserTarget) {
+      userQuery.role = { $in: notification.targetRoles };
+
+    } else {
+      // Both — intersection: must match userId AND role
+      userQuery._id  = { $in: notification.targetUserIds };
+      userQuery.role = { $in: notification.targetRoles };
+    }
+
+    const usersToNotify = await User.find(userQuery).select('fcmToken').lean();
+
+    // Fire-and-forget — don't block the HTTP response
+    Promise.allSettled(
+      usersToNotify.map(u =>
+        sendPushNotification({
+          fcmToken: u.fcmToken,
+          title:    notification.title,
+          body:     notification.body,
+          data: {
+            notificationId: notification._id.toString(),
+            type:           notification.type    ?? '',
+            priority:       notification.priority ?? '',
+          },
+        })
+      )
+    ).then(results => {
+      const failed = results.filter(r => r.status === 'rejected').length;
+      if (failed > 0) console.warn(`⚠️  ${failed} push notification(s) failed.`);
+    });
 
     res.status(201).json({ success: true, notification });
   } catch (err) {

@@ -11,6 +11,7 @@ const {
   reopenAnomaly,
   advancePipelineStage,
   deleteRowFlag,
+  markFlagRead,
 } = require('../../controllers/manereja/rowFlagController');
 
 const {
@@ -34,7 +35,7 @@ router.patch('/:id/resolve',               resolveAnomaly);
 router.patch('/:id/reopen',                reopenAnomaly);
 router.patch('/:id/advance-stage',         advancePipelineStage);
 router.delete('/:id',                      deleteRowFlag);
-
+router.patch('/:id/read', markFlagRead);
 // ── Thread messages ───────────────────────────────────────────────────────────
 router.post('/:id/messages',               postMessage);
 router.get('/:id/messages',                getMessages);

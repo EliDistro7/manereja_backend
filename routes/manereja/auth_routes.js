@@ -1,6 +1,7 @@
 const express = require('express');
 const { body } = require('express-validator');
 const userController = require('../../controllers/manereja/user-controller');
+const User = require('../../models/manereja/user');
 
 const { authenticateToken, optionalAuth } = require('../../middleware/auth'); // Adjust path as needed
 
@@ -178,6 +179,25 @@ router.post('/google-auth', googleAuthValidation, userController.googleAuth);
 router.post('/reset-password', resetPasswordValidation, userController.resetPassword);
 router.post('/verify-token', userController.verifyToken);
 router.get('/auto-login', userController.autoLogin);
+
+// user-routes.js
+router.patch('/fcm-token', authenticateToken, async (req, res) => {
+  try {
+    console.log('[FCM] ▶️  Received token update request for userId:', req.user.id);
+    const { fcmToken } = req.body;
+    if (!fcmToken) {
+      console.log('[FCM] ❌ No fcmToken provided in request body');
+      return res.status(400).json({ error: 'fcmToken required' });
+    }
+
+    await User.findByIdAndUpdate(req.user.id, { fcmToken });
+    console.log(`[FCM] ✅ Token saved for userId: ${req.user.id}`);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[FCM] ❌ Save token error:', err);
+    res.status(500).json({ error: 'Failed to save token' });
+  }
+});
 
 // Protected routes (authentication required)
 router.get('/me', authenticateToken, userController.getCurrentUser);

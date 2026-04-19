@@ -1148,7 +1148,9 @@ router.post('/check-in', authenticate, async (req, res) => {
     ? `${employeeName} checked in ${formatDuration(lateBy)} late.`
     : `${employeeName} checked in on time.`,
   type:     'alert',
+  
   priority: isLate ? 'high' : 'normal',
+  actions: [{ label: 'View Attendance', deepLink: '/attendance/dashboard', isPrimary: true }],
   metadata: {
     event:        'check_in',
     employeeId,
@@ -1412,6 +1414,7 @@ router.put('/check-out/:attendanceId', authenticate, async (req, res) => {
     + (isEarlyDeparture ? ' Early departure.' : ''),
   type:     'alert',
   priority: isEarlyDeparture ? 'high' : 'normal',
+  actions: [{ label: 'View Attendance', deepLink: '/attendance/dashboard', isPrimary: true }],
   metadata: {
     event:        'check_out',
     employeeId:   attendance.employeeId,

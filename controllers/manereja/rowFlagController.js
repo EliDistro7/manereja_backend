@@ -4,7 +4,8 @@ const RowFlagMessage = require('../../models/manereja/RowFlagMessage');
 const PipelineStageHistory = require('../../models/manereja/PipelineStageHistory');
 const ReportSubmission = require('../../models/manereja/report-submission');
 const ReportTemplate = require('../../models/manereja/report-template');
-const notifyUser = require('../../utils/notifyUser');
+const { notifyUser } = require('../../services/businessNotificationService');
+const RowFlagRead    = require('../../models/manereja/RowFlagRead');
 const { emitToFlagRoom }   = require('../../socket/events/rowFlagEvents');
  
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -95,22 +96,23 @@ exports.createRowFlag = async (req, res) => {
       messageType: 'system',
     });
  
-    await notifyUser(req.app, {
-      title: 'Row flagged for follow-up',
-      body:  `Your report row has been flagged: "${contextHeader}"`,
-      type:  'alert',
-      priority: 'high',
-      targetUserIds: [assignedTo],
-      metadata: {
-        flagType,
-        rowFlagId:    rowFlag._id.toString(),
-        submissionId,
-        rowId,
-        contextHeader,
-        projectId,
-      },
-      actions: [{ label: 'View Thread', deepLink: `/flags/${rowFlag._id}`, isPrimary: true }],
-    });
+  await notifyUser(assignedTo, {
+  title:    '🚩 Row flagged for follow-up',
+  body:     `A row has been assigned to you for review: "${contextHeader}"`,
+  type:     'alert',
+  priority: 'high',
+  persist:  true,
+  actions:  [{ label: 'View Thread', deepLink: `/flags/${rowFlag._id}`, isPrimary: true }],
+  metadata: {
+    event:        'flag_created',
+    flagType,
+    rowFlagId:    rowFlag._id.toString(),
+    submissionId,
+    rowId,
+    contextHeader,
+    projectId,
+  },
+});
  
     // ── Emit flag_created to assigned employee if they happen to be in the room
     // (unlikely on creation but correct for edge cases)
@@ -148,16 +150,41 @@ exports.getRowFlag = async (req, res) => {
     return res.status(500).json({ success: false, message: err.message });
   }
 };
+
+
+// ── PATCH /api/row-flags/:id/read ─────────────────────────────────────────────
+exports.markFlagRead = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const flagId = req.params.id;
+
+    await RowFlagRead.findOneAndUpdate(
+      { flagId, userId },
+      { lastReadAt: new Date() },
+      { upsert: true, new: true },
+    );
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('markFlagRead error:', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
  
 // ── GET /api/row-flags ────────────────────────────────────────────────────────
 exports.listRowFlags = async (req, res) => {
   try {
+    const userId = req.user.id;
     const {
       projectId, assignedTo, flaggedBy, flagType, status,
       includeTerminal = 'false',
     } = req.query;
- 
-    const query = { isDeleted: false };
+
+    const query = {
+      isDeleted: false,
+      // Only return flags where the caller is a party
+      $or: [{ flaggedBy: userId }, { assignedTo: userId }],
+    };
     if (projectId)  query.projectId  = projectId;
     if (assignedTo) query.assignedTo = assignedTo;
     if (flaggedBy)  query.flaggedBy  = flaggedBy;
@@ -167,19 +194,62 @@ exports.listRowFlags = async (req, res) => {
     } else if (includeTerminal === 'false') {
       query.status = { $nin: TERMINAL_STATUSES };
     }
- 
-    const rowFlags = await RowFlag.find(query)
+
+    const flags = await RowFlag.find(query)
       .populate('flaggedBy', 'name email profilePicture')
       .populate('assignedTo', 'name email profilePicture')
-      .sort({ createdAt: -1 });
- 
+      .sort({ createdAt: -1 })
+      .lean({ virtuals: true });
+
+    if (flags.length === 0) return res.json({ success: true, rowFlags: [] });
+
+    const flagIds = flags.map(f => f._id);
+
+    // One query: all read receipts for this user across all returned flags
+    const readReceipts = await RowFlagRead.find({
+      flagId: { $in: flagIds },
+      userId,
+    }).lean();
+
+    const lastReadMap = {};
+    for (const r of readReceipts) {
+      lastReadMap[r.flagId.toString()] = r.lastReadAt;
+    }
+
+    // Count unread per flag in parallel
+    const unreadCounts = await Promise.all(
+      flags.map(async (flag) => {
+        const lastReadAt = lastReadMap[flag._id.toString()];
+        const msgQuery = {
+          rowFlagId:   flag._id,
+          senderId:    { $ne: userId },  // don't count own messages
+          messageType: { $ne: 'system' }, // system messages aren't "unread"
+        };
+        if (lastReadAt) {
+          msgQuery.createdAt = { $gt: lastReadAt };
+        }
+        const count = await RowFlagMessage.countDocuments(msgQuery);
+        return { flagId: flag._id.toString(), count };
+      })
+    );
+
+    const unreadMap = {};
+    for (const { flagId, count } of unreadCounts) {
+      unreadMap[flagId] = count;
+    }
+
+    const rowFlags = flags.map(f => ({
+      ...f,
+      unreadCount: unreadMap[f._id.toString()] ?? 0,
+    }));
+
     return res.json({ success: true, rowFlags });
   } catch (err) {
     console.error('listRowFlags error:', err);
     return res.status(500).json({ success: false, message: err.message });
   }
 };
- 
+
 // ── PATCH /api/row-flags/:id/resolve ─────────────────────────────────────────
 exports.resolveAnomaly = async (req, res) => {
   try {
@@ -200,17 +270,21 @@ exports.resolveAnomaly = async (req, res) => {
       content: systemContent, messageType: 'system',
     });
  
-    await notifyUser(req.app, {
-      title: 'Flag resolved',
-      body:  `Your flagged row "${rowFlag.contextHeader}" has been resolved.`,
-      type:  'alert', priority: 'normal',
-      targetUserIds: [rowFlag.assignedTo.toString()],
-      metadata: {
-        flagType: 'anomaly', rowFlagId: rowFlag._id.toString(),
-        contextHeader: rowFlag.contextHeader, projectId: rowFlag.projectId.toString(),
-      },
-      actions: [{ label: 'View Thread', deepLink: `/flags/${rowFlag._id}`, isPrimary: true }],
-    });
+  await notifyUser(rowFlag.assignedTo.toString(), {
+  title:    '✅ Flag resolved',
+  body:     `Your flagged row "${rowFlag.contextHeader}" has been resolved.`,
+  type:     'alert',
+  priority: 'normal',
+  persist:  true,
+  actions:  [{ label: 'View Thread', deepLink: `/flags/${rowFlag._id}`, isPrimary: true }],
+  metadata: {
+    event:         'flag_resolved',
+    flagType:      'anomaly',
+    rowFlagId:     rowFlag._id.toString(),
+    contextHeader: rowFlag.contextHeader,
+    projectId:     rowFlag.projectId.toString(),
+  },
+});
  
     // ── Real-time: push system message + status change into the room ──────
     _emitSystemMessage(req.app, rowFlag, systemContent);
@@ -249,17 +323,21 @@ exports.reopenAnomaly = async (req, res) => {
       content: systemContent, messageType: 'system',
     });
  
-    await notifyUser(req.app, {
-      title: 'Flag reopened',
-      body:  `Your flagged row "${rowFlag.contextHeader}" has been reopened and requires your attention.`,
-      type:  'alert', priority: 'high',
-      targetUserIds: [rowFlag.assignedTo.toString()],
-      metadata: {
-        flagType: 'anomaly', rowFlagId: rowFlag._id.toString(),
-        contextHeader: rowFlag.contextHeader, projectId: rowFlag.projectId.toString(),
-      },
-      actions: [{ label: 'View Thread', deepLink: `/flags/${rowFlag._id}`, isPrimary: true }],
-    });
+  await notifyUser(rowFlag.assignedTo.toString(), {
+  title:    '🔁 Flag reopened',
+  body:     `Your flagged row "${rowFlag.contextHeader}" has been reopened and requires attention.`,
+  type:     'alert',
+  priority: 'high',
+  persist:  true,
+  actions:  [{ label: 'View Thread', deepLink: `/flags/${rowFlag._id}`, isPrimary: true }],
+  metadata: {
+    event:         'flag_reopened',
+    flagType:      'anomaly',
+    rowFlagId:     rowFlag._id.toString(),
+    contextHeader: rowFlag.contextHeader,
+    projectId:     rowFlag.projectId.toString(),
+  },
+});
  
     _emitSystemMessage(req.app, rowFlag, systemContent);
     emitToFlagRoom(req.app, rowFlag._id.toString(), 'flag_status_changed', {
@@ -320,18 +398,31 @@ exports.advancePipelineStage = async (req, res) => {
       content: systemContent, messageType: 'system',
     });
  
-    await notifyUser(req.app, {
-      title: isClosedWon ? '🎉 Deal closed!' : isClosedLost ? 'Deal closed (lost)' : 'Pipeline stage updated',
-      body:  `"${rowFlag.contextHeader}" has moved to: ${stageLabel}`,
-      type:  'alert', priority: isClosedWon ? 'high' : 'normal',
-      targetUserIds: [rowFlag.assignedTo.toString()],
-      metadata: {
-        flagType: 'pipeline', rowFlagId: rowFlag._id.toString(),
-        fromStage, toStage,
-        contextHeader: rowFlag.contextHeader, projectId: rowFlag.projectId.toString(),
-      },
-      actions: [{ label: 'View Pipeline', deepLink: `/flags/${rowFlag._id}/pipeline`, isPrimary: true }],
-    });
+  await notifyUser(rowFlag.assignedTo.toString(), {
+  title:    isClosedWon
+    ? '🎉 Deal closed!'
+    : isClosedLost
+      ? '❌ Deal closed (lost)'
+      : '📊 Pipeline stage updated',
+  body:     `"${rowFlag.contextHeader}" has moved to: ${stageLabel}`,
+  type:     'alert',
+  priority: isClosedWon ? 'high' : 'normal',
+  persist:  true,
+  actions:  [{
+    label:    isClosedWon || isClosedLost ? 'View Result' : 'View Pipeline',
+    deepLink: `/flags/${rowFlag._id}`,
+    isPrimary: true,
+  }],
+  metadata: {
+    event:         'pipeline_stage_advanced',
+    flagType:      'pipeline',
+    rowFlagId:     rowFlag._id.toString(),
+    fromStage,
+    toStage,
+    contextHeader: rowFlag.contextHeader,
+    projectId:     rowFlag.projectId.toString(),
+  },
+});;
  
     // ── Real-time: system message + stage change into the room ────────────
     _emitSystemMessage(req.app, rowFlag, systemContent);
@@ -361,6 +452,21 @@ exports.deleteRowFlag = async (req, res) => {
     rowFlag.isDeleted = true;
     rowFlag.deletedAt = new Date();
     await rowFlag.save();
+
+
+    await notifyUser(rowFlag.assignedTo.toString(), {
+  title:    'Flag removed',
+  body:     `The flagged row "${rowFlag.contextHeader}" has been removed.`,
+  type:     'alert',
+  priority: 'normal',
+  persist:  false,   // ephemeral — no need to persist a deletion notice
+  metadata: {
+    event:         'flag_deleted',
+    flagType:      rowFlag.flagType,
+    rowFlagId:     rowFlag._id.toString(),
+    contextHeader: rowFlag.contextHeader,
+  },
+});
  
     // Notify the room so clients can close the thread screen
     emitToFlagRoom(req.app, rowFlag._id.toString(), 'flag_status_changed', {
