@@ -17,7 +17,7 @@ const PackageFeatureSchema = new mongoose.Schema({
   category: {
     type: String,
     enum: ['accounting', 'task_management', 'inventory', 'analytics', 'team', 'collaboration'],
-    required: true
+    required: true,
   }
 }, { _id: false });
 

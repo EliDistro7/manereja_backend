@@ -123,6 +123,10 @@ const AttendanceSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Location'
   },
+  utcOffsetMinutes: { 
+  type: Number, 
+  default: 0,  // UTC fallback — won't silently break old records
+},
   checkOutMethod: { 
     type: String, 
     enum: ['fingerprint', 'faceId', 'pin', 'manual']
@@ -188,71 +192,79 @@ const AttendanceSchema = new mongoose.Schema({
  * Fully synced with Flutter frontend WorkplaceSettings model
  */
 const WorkplaceSettingsSchema = new mongoose.Schema({
-  businessProfileId: { 
-    type: String, 
-    required: true, 
+  businessProfileId: {
+    type: String,
+    required: true,
     unique: true,
-    index: true 
+    index: true
   },
-  
+
   // Workplace location - references Location model
   workplaceLocation: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Location',
     required: true
   },
-  
+
   // Geofencing
-  allowedRadius: { 
-    type: Number, 
-    default: 0.5 
-  }, // in kilometers (500 meters default)
-  
-  // Expected timing
-  expectedCheckInHour: { 
-    type: Number, 
-    required: true, 
-    min: 0, 
-    max: 23 
-  },
-  expectedCheckInMinute: { 
-    type: Number, 
-    required: true, 
-    min: 0, 
-    max: 59 
-  },
-  expectedCheckOutHour: { 
-    type: Number, 
-    min: 0, 
-    max: 23 
-  },
-  expectedCheckOutMinute: { 
-    type: Number, 
-    min: 0, 
-    max: 59 
-  },
-  
-  // Grace period
-  gracePeriodMinutes: { 
-    type: Number, 
-    default: 15 
-  },
-  
-  // Verification requirements
-  requireBiometric: { 
-    type: Boolean, 
-    default: true 
-  },
-  requireLocationVerification: { 
-    type: Boolean, 
-    default: true 
-  },
-  requirePhoto: { 
-    type: Boolean, 
-    default: false 
+  allowedRadius: {
+    type: Number,
+    default: 0.5 // in kilometers (500 meters default)
   },
 
-    // ✅ NEW: Registered Members/Employees
+  // Timezone — IANA string (e.g. "Africa/Dar_es_Salaam")
+  // Sent from Flutter: use the `timezone` package to get the IANA name,
+  // or map utcOffsetMinutes on the server if Flutter only sends the offset.
+  timezone: {
+    type: String,
+    default: 'UTC'
+  },
+
+  // Expected timing
+  expectedCheckInHour: {
+    type: Number,
+    required: true,
+    min: 0,
+    max: 23
+  },
+  expectedCheckInMinute: {
+    type: Number,
+    required: true,
+    min: 0,
+    max: 59
+  },
+  expectedCheckOutHour: {
+    type: Number,
+    min: 0,
+    max: 23
+  },
+  expectedCheckOutMinute: {
+    type: Number,
+    min: 0,
+    max: 59
+  },
+
+  // Grace period
+  gracePeriodMinutes: {
+    type: Number,
+    default: 15
+  },
+
+  // Verification requirements
+  requireBiometric: {
+    type: Boolean,
+    default: true
+  },
+  requireLocationVerification: {
+    type: Boolean,
+    default: true
+  },
+  requirePhoto: {
+    type: Boolean,
+    default: false
+  },
+
+  // Registered Members/Employees
   members: [{
     userId: {
       type: String,
@@ -270,7 +282,6 @@ const WorkplaceSettingsSchema = new mongoose.Schema({
       type: Boolean,
       default: true
     },
-    // Link to biometric registrations
     biometricRegistrations: [{
       type: mongoose.Schema.Types.ObjectId,
       ref: 'EmployeeBiometric'
@@ -284,33 +295,27 @@ const WorkplaceSettingsSchema = new mongoose.Schema({
       ref: 'ManerejaUser'
     }
   }],
-  
+
   // Work days (1=Monday, 2=Tuesday, ..., 7=Sunday)
-  workDays: { 
-    type: [Number], 
+  workDays: {
+    type: [Number],
     default: [1, 2, 3, 4, 5, 6] // Mon-Sat default
   },
-  
-  // Status
-  isActive: { 
-    type: Boolean, 
-    default: true 
+
+  isActive: {
+    type: Boolean,
+    default: true
   },
 
-   allowedRadius: { type: Number, default: 0.5 },
-  expectedCheckInHour: { type: Number, required: true },
-  expectedCheckInMinute: { type: Number, required: true },
-  
-  createdAt: { 
-    type: Date, 
-    default: Date.now 
+  createdAt: {
+    type: Date,
+    default: Date.now
   },
-  updatedAt: { 
-    type: Date, 
-    default: Date.now 
+  updatedAt: {
+    type: Date,
+    default: Date.now
   }
 });
-
 /**
  * Employee Biometric Registration Schema
  * For storing fingerprint/face ID registrations
@@ -1884,136 +1889,109 @@ router.get('/workplace-settings/:businessProfileId', authenticate, verifyBusines
   }
 });
 
-/**
- * Create or update workplace settings
- * POST /api/attendance/workplace-settings/:businessProfileId
- * 
- * ✅ FIXED: Properly handles client-sent IDs by removing them
- * and letting MongoDB generate proper ObjectIds
- */
+
 router.post('/workplace-settings/:businessProfileId', authenticate, verifyBusinessAccess, async (req, res) => {
   try {
     const { businessProfileId } = req.params;
     const settingsData = { ...req.body };
 
-    console.log('Creating/updating workplace settings for:', businessProfileId);
-    console.log('Received data:', settingsData);
-    
-    // ✅ CRITICAL: Remove client-generated IDs - let MongoDB handle it
-    delete settingsData.id;           // Remove Flutter-generated ID
-    delete settingsData._id;          // Remove any _id field
-    delete settingsData.createdAt;    // Mongoose timestamps handles this
-    delete settingsData.updatedAt;    // Mongoose timestamps handles this
-    
+    // Always normalize businessProfileId to URL param (source of truth)
+    settingsData.businessProfileId = businessProfileId;
+
+    // Remove client-generated IDs and timestamps
+    delete settingsData.id;
+    delete settingsData._id;
+    delete settingsData.createdAt;
+    delete settingsData.updatedAt;
+
     // Validate required fields
     if (!settingsData.workplaceLocation) {
-      return res.status(400).json({ 
-        message: 'workplaceLocation (Location ID) is required' 
-      });
+      return res.status(400).json({ message: 'workplaceLocation (Location ID) is required' });
     }
-    
-    if (settingsData.expectedCheckInHour === undefined || 
-        settingsData.expectedCheckInMinute === undefined) {
-      return res.status(400).json({ 
-        message: 'expectedCheckInHour and expectedCheckInMinute are required' 
-      });
+
+    if (settingsData.expectedCheckInHour === undefined || settingsData.expectedCheckInMinute === undefined) {
+      return res.status(400).json({ message: 'expectedCheckInHour and expectedCheckInMinute are required' });
     }
-    
+
     // Validate workplace location exists
     const location = await Location.findById(settingsData.workplaceLocation);
     if (!location) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         message: 'Invalid workplace location ID. Location not found.',
         receivedId: settingsData.workplaceLocation
       });
     }
-    
-    console.log('Validated workplace location:', location.displayName);
-    
+
     // Validate work days
     if (settingsData.workDays) {
-      const validDays = settingsData.workDays.every(day => 
-        day >= 1 && day <= 7
-      );
+      const validDays = settingsData.workDays.every(day => day >= 1 && day <= 7);
       if (!validDays) {
-        return res.status(400).json({ 
-          message: 'Invalid work days. Must be numbers between 1 (Monday) and 7 (Sunday)' 
+        return res.status(400).json({
+          message: 'Invalid work days. Must be numbers between 1 (Monday) and 7 (Sunday)'
         });
       }
     }
-    
-    // Check if settings already exist for this business profile
-    let settings = await WorkplaceSettings.findOne({ businessProfileId });
+
+    // Search by both IDs to handle any legacy mismatch
+    let settings = await WorkplaceSettings.findOne({
+      $or: [
+        { businessProfileId },
+        { businessProfileId: req.body.businessProfileId }
+      ]
+    });
+
     let isNew = false;
-    
+
     if (settings) {
-      // Update existing settings
-      console.log('Updating existing workplace settings');
       Object.keys(settingsData).forEach(key => {
         settings[key] = settingsData[key];
       });
       settings.updatedAt = new Date();
     } else {
-      // Create new settings - MongoDB will auto-generate _id
-      console.log('Creating new workplace settings');
-      settings = new WorkplaceSettings({
-        businessProfileId,
-        ...settingsData
-      });
+      settings = new WorkplaceSettings({ businessProfileId, ...settingsData });
       isNew = true;
     }
-    
+
     await settings.save();
     await settings.populate('workplaceLocation');
-    
-    console.log('Workplace settings saved successfully with ID:', settings._id);
-    
-    res.json({ 
-      message: isNew 
-        ? 'Workplace settings created successfully' 
-        : 'Workplace settings updated successfully',
+
+    res.json({
+      message: isNew ? 'Workplace settings created successfully' : 'Workplace settings updated successfully',
       settings,
       isNew
     });
+
   } catch (error) {
-    console.error('Error saving workplace settings:', error);
-    
-    // Handle duplicate key error
     if (error.code === 11000) {
-      return res.status(400).json({ 
-        message: 'Workplace settings already exist for this business profile' 
+      return res.status(400).json({
+        message: 'Workplace settings already exist for this business profile'
       });
     }
-    
-    // Handle validation errors
+
     if (error.name === 'ValidationError') {
-      const errorDetails = Object.keys(error.errors).map(key => ({
-        field: key,
-        message: error.errors[key].message,
-        value: error.errors[key].value
-      }));
-      
       return res.status(400).json({
         message: 'Validation failed',
         error: error.message,
-        details: errorDetails
+        details: Object.keys(error.errors).map(key => ({
+          field: key,
+          message: error.errors[key].message,
+          value: error.errors[key].value
+        }))
       });
     }
-    
-    // Handle cast errors (like invalid ObjectId)
+
     if (error.name === 'CastError') {
       return res.status(400).json({
         message: `Invalid ${error.path}: ${error.value}`,
         error: error.message
       });
     }
-    
-    res.status(500).json({ 
-      message: 'Server error',
-      error: error.message 
-    });
+
+    console.error('Workplace settings error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
+
 
 /**
  * Update specific workplace settings fields
@@ -2432,3 +2410,6 @@ router.get('/health', (req, res) => {
 
 // Export the router
 module.exports = router;
+module.exports.Attendance = Attendance;
+module.exports.WorkplaceSettings = WorkplaceSettings;
+module.exports.EmployeeBiometric = EmployeeBiometric;

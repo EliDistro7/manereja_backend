@@ -37,7 +37,10 @@ const fcmTokenRoutes = require('./routes/manereja/fcm-token-routes.js');
 
 const rowFlagRoutes   = require('./routes/manereja/rowFlag-routes');
 const startRowFlagCron = require('./jobs/rowFlagCron');
+const startPendingNotificationCron = require('./jobs/pendingNotificationCronJob');
 const { userSockets } = require('./socket/base');
+const startTaskChecklistNotificationCron = require('./jobs/taskChecklistNotificationCron');
+
 //require('./cron/expireSubscriptions');
 
 const PORT = process.env.PORT || 5000;
@@ -94,27 +97,29 @@ app.use((req, res, next) => {
 // Health check endpoint
 app.get('/health', (req, res) => {
     res.json({ status: 'OK', timestamp: new Date().toISOString() });
-});
+})
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGO_URL, {
     useNewUrlParser: true,
     useUnifiedTopology: true,
-    connectTimeoutMS: 20000,
+    connectTimeoutMS: 40000,
     socketTimeoutMS: 45000,
 })
 .then(() => {
     console.log("Connected to MongoDB");
    //
    // TanzaniaSeed.seedTanzaniaLocations();
-//PackagesSeed.seedPackages();
-    //seedAdmin();
+   // PackagesSeed.seedPackages();
+    //seedAdmin()
 
         const io = initSocket(server);
     app.set('io', io);
     app.set('userSockets', userSockets);
 
     startRowFlagCron(app); // ✅ DB is ready, sockets are ready
+    startPendingNotificationCron(); // ✅ DB is ready, sockets are ready
+   // startTaskChecklistNotificationCron();
 
     server.listen(PORT, '0.0.0.0', () => {
       console.log(`Server started on port ${PORT}`);

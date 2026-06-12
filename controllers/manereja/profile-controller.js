@@ -5,6 +5,7 @@ const BusinessProfile = require('../../models/manereja/business-profile.js');
 const User = require('../../models/manereja/user.js');
 // Add this import at the top with other requires
 const { migrateScreenPermissions } = require('../../utils/manereja/migrateScreenPermissions');
+const { notifyUser } = require('../../services/businessNotificationService');
 
 class ProfileController {
   // Standard response helpers
@@ -359,8 +360,8 @@ updateProfile = async (req, res) => {
   // PROFILE SHARING & MEMBERS
   // ============================================
 
-  // Share profile with another user
- shareProfile = async (req, res) => {
+// ── shareProfile ──────────────────────────────────────────────────────────────
+shareProfile = async (req, res) => {
   try {
     const { profileId } = req.params;
     const { userEmail, role } = req.body;
@@ -371,9 +372,7 @@ updateProfile = async (req, res) => {
     }
 
     const profile = await BusinessProfile.findById(profileId);
-    if (!profile) {
-      return this.errorResponse(res, 'Profile not found', 404);
-    }
+    if (!profile) return this.errorResponse(res, 'Profile not found', 404);
 
     const userRole = profile.getUserRole(userId);
     if (!['owner', 'admin'].includes(userRole)) {
@@ -381,199 +380,224 @@ updateProfile = async (req, res) => {
     }
 
     const targetUser = await User.findOne({ email: userEmail.toLowerCase() });
-    if (!targetUser) {
-      return this.errorResponse(res, 'User not found', 404);
-    }
+    if (!targetUser) return this.errorResponse(res, 'User not found', 404);
 
     if (profile.members.has(targetUser._id.toString())) {
       return this.errorResponse(res, 'User is already a member', 400);
     }
 
-    // Add member to profile
     profile.members.set(targetUser._id.toString(), {
-      userId: targetUser._id,
-      userName: targetUser.name || 'Unknown User',  // ✅ FIX: Handle null name
-      userEmail: targetUser.email || '',            // ✅ Already handled
+      userId:    targetUser._id,
+      userName:  targetUser.name  || 'Unknown User',
+      userEmail: targetUser.email || '',
       role,
       addedAt: new Date(),
-      addedBy: userId
+      addedBy: userId,
     });
-
     await profile.save();
 
     targetUser.businessProfileIds.push(profile._id);
-    
-    if (!targetUser.activeProfileId) {
-      targetUser.activeProfileId = profile._id;
-      console.log('✅ Set shared profile as active for new member');
-    }
-    
+    if (!targetUser.activeProfileId) targetUser.activeProfileId = profile._id;
     await targetUser.save();
 
+    // ── Notify the new member ─────────────────────────────────────────────
+    const inviter = await User.findById(userId).select('name').lean();
+    notifyUser(targetUser._id.toString(), {
+      title:    `📋 You've been added to "${profile.name}"`,
+      body:     `${inviter?.name ?? 'Someone'} added you as ${role} to "${profile.name}".`,
+      type:     'info',
+      priority: 'normal',
+      persist:  true,
+      metadata: {
+        event:     'profile_member_added',
+        profileId: profileId.toString(),
+        role,
+        addedBy:   userId,
+      },
+      actions: [{ label: 'View profile', deepLink: `/profiles/${profileId}`, isPrimary: true }],
+    }).catch(e => console.warn('[shareProfile] notify failed:', e.message));
+
     return this.successResponse(res, 'Profile shared successfully', {
-      profile: profile.toJSON()
+      profile: profile.toJSON(),
     });
   } catch (error) {
     console.error('Share profile error:', error);
     return this.errorResponse(res, 'Error sharing profile', 500);
   }
 };
-  // Update member role
-  updateMemberRole = async (req, res) => {
-    try {
-      const { profileId, userId: memberId } = req.params;
-      const { role } = req.body;
-      const userId = req.user.userId;
+ // ── updateMemberRole ──────────────────────────────────────────────────────────
+updateMemberRole = async (req, res) => {
+  try {
+    const { profileId, userId: memberId } = req.params;
+    const { role } = req.body;
+    const userId = req.user.userId;
 
-      // Validate role
-      const validRoles = ['admin', 'editor', 'viewer'];
-      if (!validRoles.includes(role)) {
-        return this.errorResponse(res, 'Invalid role. Must be admin, editor, or viewer', 400);
-      }
-
-      // Find profile
-      const profile = await BusinessProfile.findById(profileId);
-      if (!profile) {
-        return this.errorResponse(res, 'Profile not found', 404);
-      }
-
-      // Check if user can manage members
-      const userRole = profile.getUserRole(userId);
-      if (!['owner', 'admin'].includes(userRole)) {
-        return this.errorResponse(res, 'Only owner and admin can update member roles', 403);
-      }
-
-      // Get member
-      const member = profile.members.get(memberId);
-      if (!member) {
-        return this.errorResponse(res, 'Member not found', 404);
-      }
-
-      // Cannot change owner role
-      if (member.userId.toString() === profile.ownerId.toString()) {
-        return this.errorResponse(res, 'Cannot change owner role', 400);
-      }
-
-      // Update role
-      member.role = role;
-      profile.members.set(memberId, member);
-      await profile.save();
-
-      return this.successResponse(res, 'Member role updated successfully', {
-        profile: profile.toJSON()
-      });
-    } catch (error) {
-      console.error('Update member role error:', error);
-      return this.errorResponse(res, 'Failed to update member role', 500);
+    if (!['admin', 'editor', 'viewer'].includes(role)) {
+      return this.errorResponse(res, 'Invalid role. Must be admin, editor, or viewer', 400);
     }
-  };
 
-  // Remove member from profile
-  removeMember = async (req, res) => {
-    try {
-      const { profileId, userId: memberId } = req.params;
-      const userId = req.user.userId;
+    const profile = await BusinessProfile.findById(profileId);
+    if (!profile) return this.errorResponse(res, 'Profile not found', 404);
 
-      const profile = await BusinessProfile.findById(profileId);
-      if (!profile) {
-        return this.errorResponse(res, 'Profile not found', 404);
-      }
-
-      // Check permissions
-      const userRole = profile.getUserRole(userId);
-      if (!['owner', 'admin'].includes(userRole) && userId !== memberId) {
-        return this.errorResponse(res, 'Permission denied', 403);
-      }
-
-      // Can't remove owner
-      if (profile.ownerId.toString() === memberId) {
-        return this.errorResponse(res, 'Cannot remove profile owner', 400);
-      }
-
-      // Remove member
-      profile.members.delete(memberId);
-      await profile.save();
-
-      // Remove profile from user's list
-      const memberUser = await User.findByIdAndUpdate(
-        memberId, 
-        { $pull: { businessProfileIds: profile._id } },
-        { new: true }
-      );
-
-      // ✅ If removed profile was active, set new active profile
-      if (memberUser && memberUser.activeProfileId?.toString() === profileId) {
-        if (memberUser.businessProfileIds.length > 0) {
-          memberUser.activeProfileId = memberUser.businessProfileIds[0];
-          await memberUser.save();
-          console.log('✅ Set new active profile after removal:', memberUser.activeProfileId);
-        } else {
-          memberUser.activeProfileId = null;
-          await memberUser.save();
-          console.log('⚠️ No profiles left - cleared active profile');
-        }
-      }
-
-      return this.successResponse(res, 'Member removed successfully', {
-        profile: profile.toJSON()
-      });
-    } catch (error) {
-      console.error('Remove member error:', error);
-      return this.errorResponse(res, 'Error removing member', 500);
+    const userRole = profile.getUserRole(userId);
+    if (!['owner', 'admin'].includes(userRole)) {
+      return this.errorResponse(res, 'Only owner and admin can update member roles', 403);
     }
-  };
 
-  // Leave a shared profile
-  leaveProfile = async (req, res) => {
-    try {
-      const { profileId } = req.params;
-      const userId = req.user.userId;
+    const member = profile.members.get(memberId);
+    if (!member) return this.errorResponse(res, 'Member not found', 404);
 
-      const profile = await BusinessProfile.findById(profileId);
-      if (!profile) {
-        return this.errorResponse(res, 'Profile not found', 404);
-      }
-
-      // Cannot leave if you're the owner
-      if (profile.ownerId.toString() === userId) {
-        return this.errorResponse(res, 'Owner cannot leave the profile. Delete it instead.', 400);
-      }
-
-      // Check if user is a member
-      if (!profile.members.has(userId)) {
-        return this.errorResponse(res, 'You are not a member of this profile', 400);
-      }
-
-      // Remove member
-      profile.members.delete(userId);
-      await profile.save();
-
-      // Remove from user's businessProfileIds
-      const user = await User.findByIdAndUpdate(
-        userId,
-        { $pull: { businessProfileIds: profileId } },
-        { new: true }
-      );
-
-      // ✅ If left profile was active, set new active profile
-      if (user && user.activeProfileId?.toString() === profileId) {
-        if (user.businessProfileIds.length > 0) {
-          user.activeProfileId = user.businessProfileIds[0];
-          await user.save();
-          console.log('✅ Set new active profile after leaving:', user.activeProfileId);
-        } else {
-          user.activeProfileId = null;
-          await user.save();
-          console.log('⚠️ No profiles left - cleared active profile');
-        }
-      }
-
-      return this.successResponse(res, 'Successfully left the profile');
-    } catch (error) {
-      console.error('Leave profile error:', error);
-      return this.errorResponse(res, 'Failed to leave profile', 500);
+    if (member.userId.toString() === profile.ownerId.toString()) {
+      return this.errorResponse(res, 'Cannot change owner role', 400);
     }
-  };
+
+    const oldRole = member.role;
+    member.role = role;
+    profile.members.set(memberId, member);
+    await profile.save();
+
+    // ── Notify the affected member ────────────────────────────────────────
+    if (memberId !== userId) {
+      const updater = await User.findById(userId).select('name').lean();
+      notifyUser(memberId, {
+        title:    `🔄 Your role in "${profile.name}" changed`,
+        body:     `${updater?.name ?? 'An admin'} changed your role from ${oldRole} to ${role}.`,
+        type:     'info',
+        priority: 'normal',
+        persist:  true,
+        metadata: {
+          event:     'member_role_updated',
+          profileId: profileId.toString(),
+          oldRole,
+          newRole:   role,
+          updatedBy: userId,
+        },
+        actions: [{ label: 'View profile', deepLink: `/profiles/${profileId}`, isPrimary: true }],
+      }).catch(e => console.warn('[updateMemberRole] notify failed:', e.message));
+    }
+
+    return this.successResponse(res, 'Member role updated successfully', {
+      profile: profile.toJSON(),
+    });
+  } catch (error) {
+    console.error('Update member role error:', error);
+    return this.errorResponse(res, 'Failed to update member role', 500);
+  }
+};
+
+// ── removeMember ──────────────────────────────────────────────────────────────
+removeMember = async (req, res) => {
+  try {
+    const { profileId, userId: memberId } = req.params;
+    const userId = req.user.userId;
+
+    const profile = await BusinessProfile.findById(profileId);
+    if (!profile) return this.errorResponse(res, 'Profile not found', 404);
+
+    const userRole = profile.getUserRole(userId);
+    if (!['owner', 'admin'].includes(userRole) && userId !== memberId) {
+      return this.errorResponse(res, 'Permission denied', 403);
+    }
+
+    if (profile.ownerId.toString() === memberId) {
+      return this.errorResponse(res, 'Cannot remove profile owner', 400);
+    }
+
+    profile.members.delete(memberId);
+    await profile.save();
+
+    const memberUser = await User.findByIdAndUpdate(
+      memberId,
+      { $pull: { businessProfileIds: profile._id } },
+      { new: true },
+    );
+
+    if (memberUser?.activeProfileId?.toString() === profileId) {
+      memberUser.activeProfileId = memberUser.businessProfileIds[0] ?? null;
+      await memberUser.save();
+    }
+
+    // ── Notify the removed member (only if someone else removed them) ─────
+    if (memberId !== userId) {
+      const remover = await User.findById(userId).select('name').lean();
+      notifyUser(memberId, {
+        title:    `❌ Removed from "${profile.name}"`,
+        body:     `${remover?.name ?? 'An admin'} removed you from "${profile.name}".`,
+        type:     'alert',
+        priority: 'high',
+        persist:  true,
+        metadata: {
+          event:     'member_removed',
+          profileId: profileId.toString(),
+          removedBy: userId,
+        },
+      }).catch(e => console.warn('[removeMember] notify failed:', e.message));
+    }
+
+    return this.successResponse(res, 'Member removed successfully', {
+      profile: profile.toJSON(),
+    });
+  } catch (error) {
+    console.error('Remove member error:', error);
+    return this.errorResponse(res, 'Error removing member', 500);
+  }
+};
+
+// ── leaveProfile ──────────────────────────────────────────────────────────────
+leaveProfile = async (req, res) => {
+  try {
+    const { profileId } = req.params;
+    const userId = req.user.userId;
+
+    const profile = await BusinessProfile.findById(profileId);
+    if (!profile) return this.errorResponse(res, 'Profile not found', 404);
+
+    if (profile.ownerId.toString() === userId) {
+      return this.errorResponse(res, 'Owner cannot leave the profile. Delete it instead.', 400);
+    }
+
+    if (!profile.members.has(userId)) {
+      return this.errorResponse(res, 'You are not a member of this profile', 400);
+    }
+
+    const leavingMember = profile.members.get(userId);
+    profile.members.delete(userId);
+    await profile.save();
+
+    const user = await User.findByIdAndUpdate(
+      userId,
+      { $pull: { businessProfileIds: profileId } },
+      { new: true },
+    );
+
+    if (user?.activeProfileId?.toString() === profileId) {
+      user.activeProfileId = user.businessProfileIds[0] ?? null;
+      await user.save();
+    }
+
+    // ── Notify the profile owner ──────────────────────────────────────────
+    const leavingUser = await User.findById(userId).select('name').lean();
+    notifyUser(profile.ownerId.toString(), {
+      title:    `👋 Member left "${profile.name}"`,
+      body:     `${leavingUser?.name ?? 'A member'} (${leavingMember?.role ?? 'member'}) left your profile.`,
+      type:     'info',
+      priority: 'normal',
+      persist:  true,
+      metadata: {
+        event:     'member_left',
+        profileId: profileId.toString(),
+        leftBy:    userId,
+        role:      leavingMember?.role ?? null,
+      },
+    }).catch(e => console.warn('[leaveProfile] notify failed:', e.message));
+
+    return this.successResponse(res, 'Successfully left the profile');
+  } catch (error) {
+    console.error('Leave profile error:', error);
+    return this.errorResponse(res, 'Failed to leave profile', 500);
+  }
+};
+
 
   // ============================================
   // SCREEN PERMISSIONS MANAGEMENT

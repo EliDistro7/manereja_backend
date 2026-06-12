@@ -33,6 +33,7 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
   function emitToUser(userId, event, data) {
     const sockets = userSockets[userId];
     if (!sockets || sockets.size === 0) {
+      console.log('user object', userId);
       warn(`emitToUser → user ${userId} has NO active sockets — event "${event}" dropped`);
       return false;
     }
@@ -107,10 +108,180 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
     }
   }
 
+
+  // ==========================================
+// PERIOD GENERATION HELPERS
+// ==========================================
+ 
+/**
+ * Returns an array of { periodStart, periodEnd, label } objects covering
+ * every expected reporting period between rangeStart and rangeEnd for the
+ * given frequency.
+ *
+ * All dates are treated as plain local-time values (no UTC shifting) to
+ * match the project's timezone policy.
+ */
+function generateExpectedPeriods(frequency, rangeStart, rangeEnd, reportingTime) {
+  const periods = [];
+  const [reportHour, reportMin] = (reportingTime ?? '18:00').split(':').map(Number);
+ 
+  // Helper: clone a date and set time to midnight
+  function startOfDay(d) {
+    const c = new Date(d);
+    c.setHours(0, 0, 0, 0);
+    return c;
+  }
+ 
+  // Helper: clone a date and set time to the reporting hour
+  function endOfPeriod(d) {
+    const c = new Date(d);
+    c.setHours(reportHour, reportMin, 0, 0);
+    return c;
+  }
+ 
+  // Helper: ISO week number (Monday-based)
+  function isoWeek(d) {
+    const date  = new Date(d);
+    date.setHours(0, 0, 0, 0);
+    date.setDate(date.getDate() + 4 - (date.getDay() || 7));
+    const yearStart = new Date(date.getFullYear(), 0, 1);
+    return Math.ceil((((date - yearStart) / 86400000) + 1) / 7);
+  }
+ 
+  const shortDays  = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+  const shortMonths = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+ 
+  if (frequency === 'per-task') {
+    // Exactly one period covering the whole range
+    periods.push({
+      periodStart: rangeStart.toISOString(),
+      periodEnd:   rangeEnd.toISOString(),
+      label:       'Task completion',
+    });
+    return periods;
+  }
+ 
+  if (frequency === 'daily') {
+    let cursor = startOfDay(rangeStart);
+    while (cursor <= rangeEnd) {
+      const pStart = new Date(cursor);
+      const pEnd   = endOfPeriod(cursor);
+      const d      = cursor;
+      periods.push({
+        periodStart: pStart.toISOString(),
+        periodEnd:   pEnd.toISOString(),
+        label: `${shortDays[d.getDay()]} ${d.getDate()} ${shortMonths[d.getMonth()]}`,
+      });
+      cursor.setDate(cursor.getDate() + 1);
+    }
+    return periods;
+  }
+ 
+  if (frequency === 'weekly') {
+    // Align to Monday of the week containing rangeStart
+    let cursor = startOfDay(rangeStart);
+    const dayOfWeek = cursor.getDay(); // 0=Sun
+    const offsetToMonday = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+    cursor.setDate(cursor.getDate() + offsetToMonday);
+ 
+    while (cursor <= rangeEnd) {
+      const weekStart = new Date(cursor);
+      const weekEnd   = new Date(cursor);
+      weekEnd.setDate(weekEnd.getDate() + 6);
+      weekEnd.setHours(reportHour, reportMin, 0, 0);
+ 
+      // Only add if the period overlaps with the requested range
+      if (weekEnd >= rangeStart) {
+        const effectiveStart = weekStart < rangeStart ? new Date(rangeStart) : weekStart;
+        periods.push({
+          periodStart: effectiveStart.toISOString(),
+          periodEnd:   weekEnd.toISOString(),
+          label: `Week ${isoWeek(weekStart)} (${weekStart.getDate()} ${shortMonths[weekStart.getMonth()]})`,
+        });
+      }
+      cursor.setDate(cursor.getDate() + 7);
+    }
+    return periods;
+  }
+ 
+  if (frequency === 'monthly') {
+    let cursor = new Date(rangeStart.getFullYear(), rangeStart.getMonth(), 1);
+ 
+    while (cursor <= rangeEnd) {
+      const monthStart = new Date(cursor);
+      const monthEnd   = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0); // last day
+      monthEnd.setHours(reportHour, reportMin, 0, 0);
+ 
+      const effectiveStart = monthStart < rangeStart ? new Date(rangeStart) : monthStart;
+      periods.push({
+        periodStart: effectiveStart.toISOString(),
+        periodEnd:   monthEnd.toISOString(),
+        label: `${shortMonths[cursor.getMonth()]} ${cursor.getFullYear()}`,
+      });
+      cursor.setMonth(cursor.getMonth() + 1);
+    }
+    return periods;
+  }
+ 
+  // Fallback — treat unknown frequencies like per-task
+  periods.push({
+    periodStart: rangeStart.toISOString(),
+    periodEnd:   rangeEnd.toISOString(),
+    label:       frequency,
+  });
+  return periods;
+}
+ 
+/**
+ * Given a submission's submissionDate (or submittedAt) and a list of
+ * expected periods, returns the index of the period that contains the date,
+ * or -1 if none match.
+ */
+function findMatchingPeriodIndex(date, periods) {
+  const d = new Date(date);
+  for (let i = 0; i < periods.length; i++) {
+    const pStart = new Date(periods[i].periodStart);
+    const pEnd   = new Date(periods[i].periodEnd);
+    if (d >= pStart && d <= pEnd) return i;
+  }
+  return -1;
+}
+
+
+  // ==========================================
+// SCHEDULE DESCRIPTION HELPER
+// ==========================================
+
+/**
+ * Builds a human-readable schedule sentence from a template's
+ * submissionFrequency + reportingTime fields.
+ *
+ * Examples:
+ *   'daily'    + '18:00' → "a daily report by 18:00"
+ *   'weekly'   + '09:00' → "a weekly report by 09:00"
+ *   'per-task' + '17:30' → "a report when the task is completed"
+ */
+function buildScheduleDescription(frequency, reportingTime) {
+  const time = reportingTime ?? '18:00';
+
+  switch (frequency) {
+    case 'daily':
+      return `a daily report by ${time}`;
+    case 'weekly':
+      return `a weekly report by ${time}`;
+    case 'monthly':
+      return `a monthly report by ${time}`;
+    case 'per-task':
+      return 'a report when the task is completed';
+    default:
+      return `a ${frequency} report by ${time}`;
+  }
+}
+
   // ==========================================
   // SHARED EMIT HELPER
   // ==========================================
-  async function emitSubmissionsList({ target, isSocket, submissions, managedProfileIds }) {
+  async function emitSubmissionsList({ target, isSocket, submissions, managedProfileIds, userId }) {
     log(`emitSubmissionsList → building profileMap for ${submissions.length} submission(s), isSocket=${isSocket}`);
 
     const uniqueProfileIds = [...new Set(
@@ -143,13 +314,12 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
       profileMap,
     };
 
-    if (isSocket) {
-      debug(`emitSubmissionsList → emitting to socket ${target.id}`);
-      target.emit('report_submissions_list', payload);
-    } else {
+  
       debug(`emitSubmissionsList → emitting to userId ${target}`);
-      emitToUser(target, 'report_submissions_list', payload);
-    }
+      emitToUser(userId, 'report_submissions_list', payload);
+
+     // console.log('submisions payload', payload);
+  
 
     ok(`emitSubmissionsList → done. Sent ${submissions.length} submission(s), ${profiles.length} profile(s) in map`);
   }
@@ -171,6 +341,7 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
       requiresApproval:         template.requiresApproval,
       allowMultipleSubmissions: template.allowMultipleSubmissions,
       submissionFrequency:      template.submissionFrequency,
+      reportingTime:            template.reportingTime ?? '18:00',
       createdAt:                template.createdAt,
       updatedAt:                template.updatedAt,
     };
@@ -224,92 +395,130 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
   // ==========================================
   // CONNECTION READY — flush pending submissions
   // ==========================================
-  socket.on('connection_ready', async ({ userId }) => {
-    log(`connection_ready fired — userId: ${userId}, socketId: ${socket.id}`);
-    try {
-      if (!userId) {
-        warn('connection_ready → userId is missing, aborting flush');
-        return;
-      }
-
-      const user = await User.findById(userId).select('businessProfileIds');
-      debug(`connection_ready → user.businessProfileIds count: ${user?.businessProfileIds?.length ?? 0}`);
-
-      let managedProfileIds = [];
-
-      if (user?.businessProfileIds?.length) {
-        const profiles = await BusinessProfile.find({
-          _id: { $in: user.businessProfileIds },
-          ...notDeleted(),
-        }).select('_id ownerId members');
-
-        debug(`connection_ready → loaded ${profiles.length} profile(s) for role check`);
-
-        managedProfileIds = profiles
-          .filter(profile => {
-            const role = profile.getUserRole(userId.toString());
-            return role === 'owner' || role === 'admin';
-          })
-          .map(p => p._id.toString());
-      }
-
-      debug(`connection_ready → found ${managedProfileIds.length} managed profile(s) for ${userId}:`, managedProfileIds);
-
-      if (managedProfileIds.length > 0) {
-        const pendingSubmissions = await ReportSubmission.find({
-          businessProfileId: { $in: managedProfileIds },
-          status: 'submitted',
-          ...notDeleted(),
-        })
-          .populate('submittedBy', 'name email profilePicture')
-          .populate('reviewedBy', 'name email')
-          .sort({ submissionDate: -1, createdAt: -1 });
-
-        log(`connection_ready → ${pendingSubmissions.length} pending submission(s) for owner/admin ${userId}`);
-
-        if (pendingSubmissions.length > 0) {
-          await emitSubmissionsList({
-            target: userId,
-            isSocket: false,
-            submissions: pendingSubmissions,
-            managedProfileIds,
-          });
-          ok(`connection_ready → flushed ${pendingSubmissions.length} submission(s) to ${userId}`);
-        } else {
-          log(`connection_ready → no pending submissions to flush for owner/admin ${userId}`);
-        }
-
-      } else {
-        log(`connection_ready → ${userId} is a regular employee, fetching own submissions`);
-
-        const mySubmissions = await ReportSubmission.find({
-          submittedBy: userId,
-          ...notDeleted(),
-        })
-          .populate('submittedBy', 'name email profilePicture')
-          .populate('reviewedBy', 'name email')
-          .sort({ submissionDate: -1, createdAt: -1 })
-          .limit(50);
-
-        log(`connection_ready → found ${mySubmissions.length} own submission(s) for employee ${userId}`);
-
-        if (mySubmissions.length > 0) {
-          await emitSubmissionsList({
-            target: userId,
-            isSocket: false,
-            submissions: mySubmissions,
-            managedProfileIds: [],
-          });
-          ok(`connection_ready → flushed ${mySubmissions.length} own submission(s) to employee ${userId}`);
-        } else {
-          log(`connection_ready → no own submissions to flush for employee ${userId}`);
-        }
-      }
-
-    } catch (error) {
-      err('connection_ready flush failed:', error);
+  
+socket.on('connection_ready', async ({ userId, businessProfileId }) => {
+  log(`connection_ready fired — userId: ${userId}, socketId: ${socket.id}`);
+  try {
+    if (!userId) {
+      warn('connection_ready → userId is missing, aborting flush');
+      return;
     }
-  });
+
+    const user = await User.findById(userId).select('businessProfileIds');
+    debug(`connection_ready → user.businessProfileIds count: ${user?.businessProfileIds?.length ?? 0}`);
+
+    let managedProfileIds = [];
+
+    if (user?.businessProfileIds?.length) {
+      const profiles = await BusinessProfile.find({
+        _id: { $in: user.businessProfileIds },
+        ...notDeleted(),
+      }).select('_id ownerId members');
+
+      debug(`connection_ready → loaded ${profiles.length} profile(s) for role check`);
+
+      managedProfileIds = profiles
+        .filter(profile => {
+          const role = profile.getUserRole(userId.toString());
+          return role === 'owner' || role === 'admin';
+        })
+        .map(p => p._id.toString());
+    }
+
+    debug(`connection_ready → found ${managedProfileIds.length} managed profile(s) for ${userId}:`, managedProfileIds);
+
+    if (managedProfileIds.length > 0) {
+      // ── Profile filter — scoped to current profile if provided ───────────
+      const profileFilter = businessProfileId
+        ? { businessProfileId }
+        : { businessProfileId: { $in: managedProfileIds } };
+
+      // ── All submissions for this profile (staff reports) ─────────────────
+      const staffSubmissions = await ReportSubmission.find({
+        ...profileFilter,
+        ...notDeleted(),
+      })
+        .populate('submittedBy', 'name email profilePicture')
+        .populate('reviewedBy', 'name email')
+        .sort({ submissionDate: -1, createdAt: -1 });
+
+      debug(`connection_ready → staff submissions: ${staffSubmissions.length}`);
+
+      // ── Owner's own submissions (they may also be task assignees) ────────
+      const ownSubmissions = await ReportSubmission.find({
+        submittedBy: userId,
+        ...(businessProfileId ? { businessProfileId } : {}),
+        ...notDeleted(),
+      })
+        .populate('submittedBy', 'name email profilePicture')
+        .populate('reviewedBy', 'name email')
+        .sort({ submissionDate: -1, createdAt: -1 })
+        .limit(50);
+
+      debug(`connection_ready → own submissions: ${ownSubmissions.length}`);
+
+      // ── Merge, dedup by _id — staff list wins on conflict ────────────────
+      const mergedMap = new Map();
+      for (const s of ownSubmissions)   mergedMap.set(s._id.toString(), s);
+      for (const s of staffSubmissions) mergedMap.set(s._id.toString(), s);
+      const submissions = [...mergedMap.values()];
+
+      log(`connection_ready → ${submissions.length} total submission(s) for owner/admin ${userId} `
+        + `(staff: ${staffSubmissions.length}, own: ${ownSubmissions.length})`);
+
+      // Always emit — even when empty — so Flutter clears isLoading.
+      await emitSubmissionsList({
+        target: userId,
+        isSocket: false,
+        submissions,
+        managedProfileIds,
+        userId,
+      });
+
+      ok(`connection_ready → flushed ${submissions.length} submission(s) to owner/admin ${userId}`);
+
+    } else {
+      // ── Regular employee: fetch their own submissions ────────────────────
+      log(`connection_ready → ${userId} is a regular employee, fetching own submissions`);
+
+      const mySubmissions = await ReportSubmission.find({
+        submittedBy: userId,
+        ...(businessProfileId ? { businessProfileId } : {}),
+        ...notDeleted(),
+      })
+        .populate('submittedBy', 'name email profilePicture')
+        .populate('reviewedBy', 'name email')
+        .sort({ submissionDate: -1, createdAt: -1 })
+        .limit(50);
+
+      log(`connection_ready → found ${mySubmissions.length} own submission(s) for employee ${userId}`);
+
+      // Always emit — even when empty — so Flutter clears isLoading.
+      await emitSubmissionsList({
+        target: userId,
+        isSocket: false,
+        submissions: mySubmissions,
+        managedProfileIds: [],
+        userId,
+      });
+
+      ok(`connection_ready → flushed ${mySubmissions.length} own submission(s) to employee ${userId}`);
+    }
+
+  } catch (error) {
+    err('connection_ready flush failed:', error);
+
+    // Emit an empty list so Flutter is never left stuck in a loading state
+    // even when the server-side resolution throws.
+    try {
+      emitToUser(userId, 'report_submissions_list', {
+        submissions: [],
+        managedProfileIds: [],
+        profileMap: {},
+      });
+    } catch (_) {}
+  }
+});
 
   // ==========================================
   // CREATE REPORT TEMPLATE
@@ -317,7 +526,7 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
   socket.on('create_report_template', async ({
     projectId, businessProfileId, name, description,
     columns, requiresApproval, allowMultipleSubmissions,
-    submissionFrequency, userId,
+    submissionFrequency, userId, reportingTime,
   }) => {
     log(`create_report_template → userId: ${userId}, profileId: ${businessProfileId}, projectId: ${projectId}, name: "${name}"`);
     try {
@@ -336,6 +545,7 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
         requiresApproval:         requiresApproval         ?? true,
         allowMultipleSubmissions: allowMultipleSubmissions ?? false,
         submissionFrequency:      submissionFrequency      ?? 'daily',
+        reportingTime:            reportingTime            ?? '18:00',
       });
 
       await template.save();
@@ -367,7 +577,7 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
     try {
       if (!projectId || projectId.toString().trim() === '') {
         warn('get_report_templates → projectId is missing');
-        socket.emit('tasker_error', { error: 'projectId is required' });
+        socket.emit('tasker_error', { error: 'projectId is required' })
         return;
       }
       const templates = await ReportTemplate.find({ projectId, ...notDeleted() })
@@ -413,100 +623,121 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
   // ==========================================
   // ATTACH REPORT TEMPLATE TO TASK
   // ==========================================
-  socket.on('attach_report_template_to_task', async ({ taskId, templateId, userId }) => {
-    log(`attach_report_template_to_task → userId: ${userId}, taskId: ${taskId}, templateId: ${templateId}`);
-    try {
-      // ── 1. Task lookup ────────────────────────────────────────────────────
-      const task = await Task.findById(taskId);
-      if (!task) {
-        warn(`attach_report_template_to_task → ❌ task ${taskId} NOT FOUND`);
-        socket.emit('tasker_error', { error: 'Task not found' });
-        return;
-      }
-      debug(`attach_report_template_to_task → task: "${task.title}" (projectId: ${task.projectId})`);
+// ==========================================
+// ATTACH REPORT TEMPLATE TO TASK
+// ==========================================
+socket.on('attach_report_template_to_task', async ({ taskId, templateId, userId }) => {
+  log(`attach_report_template_to_task → userId: ${userId}, taskId: ${taskId}, templateId: ${templateId}`);
+  try {
+    // ── 1. Task lookup ────────────────────────────────────────────────────
+    const task = await Task.findById(taskId);
+    if (!task) {
+      warn(`attach_report_template_to_task → ❌ task ${taskId} NOT FOUND`);
+      socket.emit('tasker_error', { error: 'Task not found' });
+      return;
+    }
+    debug(`attach_report_template_to_task → task: "${task.title}" (projectId: ${task.projectId})`);
 
-      // ── 2. Project lookup ─────────────────────────────────────────────────
-      const project = await Project.findById(task.projectId);
-      if (!project) {
-        warn(`attach_report_template_to_task → ❌ project ${task.projectId} NOT FOUND`);
-        socket.emit('tasker_error', { error: 'Project not found' });
-        return;
-      }
-      debug(`attach_report_template_to_task → project: "${project.name}" (profileId: ${project.businessProfileId})`);
+    // ── 2. Project lookup ─────────────────────────────────────────────────
+    const project = await Project.findById(task.projectId);
+    if (!project) {
+      warn(`attach_report_template_to_task → ❌ project ${task.projectId} NOT FOUND`);
+      socket.emit('tasker_error', { error: 'Project not found' });
+      return;
+    }
 
-      // ── 3. Permission check ───────────────────────────────────────────────
-      const profile = await BusinessProfile.findById(project.businessProfileId);
-      if (!profile) {
-        warn(`attach_report_template_to_task → ❌ profile ${project.businessProfileId} NOT FOUND`);
-        socket.emit('tasker_error', { error: 'Business profile not found' });
-        return;
-      }
+    // ── 3. Permission check ───────────────────────────────────────────────
+    const profile = await BusinessProfile.findById(project.businessProfileId);
+    if (!profile) {
+      warn(`attach_report_template_to_task → ❌ profile ${project.businessProfileId} NOT FOUND`);
+      socket.emit('tasker_error', { error: 'Business profile not found' });
+      return;
+    }
 
-      if (!(await isOwnerOrAdmin(profile, userId))) {
-        warn(`attach_report_template_to_task → ❌ access denied for userId ${userId}`);
-        socket.emit('tasker_error', { error: 'Only owner or admin can attach report templates' });
-        return;
-      }
+    if (!(await isOwnerOrAdmin(profile, userId))) {
+      warn(`attach_report_template_to_task → ❌ access denied for userId ${userId}`);
+      socket.emit('tasker_error', { error: 'Only owner or admin can attach report templates' });
+      return;
+    }
 
-      // ── 4. Template lookup ────────────────────────────────────────────────
-      const template = await ReportTemplate.findById(templateId);
-      if (!template) {
-        warn(`attach_report_template_to_task → ❌ template ${templateId} NOT FOUND`);
-        socket.emit('tasker_error', { error: 'Report template not found' });
-        return;
-      }
-      debug(`attach_report_template_to_task → template: "${template.name}"`);
+    // ── 4. Template lookup ────────────────────────────────────────────────
+    const template = await ReportTemplate.findById(templateId);
+    if (!template) {
+      warn(`attach_report_template_to_task → ❌ template ${templateId} NOT FOUND`);
+      socket.emit('tasker_error', { error: 'Report template not found' });
+      return;
+    }
+    debug(`attach_report_template_to_task → template: "${template.name}", frequency: "${template.submissionFrequency}", reportingTime: "${template.reportingTime}"`);
 
-      // ── 5. Write metadata ─────────────────────────────────────────────────
-      if (!task.metadata) task.metadata = new Map();
-      task.metadata.set('reportTemplateId', templateId);
-      task.markModified('metadata');
-      await task.save();
-      ok(`attach_report_template_to_task → ✅ metadata saved on task ${taskId}`);
+    // ── 5. Write metadata ─────────────────────────────────────────────────
+    if (!task.metadata) task.metadata = new Map();
+    task.metadata.set('reportTemplateId', templateId);
+    task.markModified('metadata');
+    await task.save();
+    ok(`attach_report_template_to_task → ✅ metadata saved on task ${taskId}`);
 
-      await task.populate('assignedTo', 'name email profilePicture');
-      await task.populate('createdBy', 'name email');
+    await task.populate('assignedTo', 'name email profilePicture');
+    await task.populate('createdBy', 'name email');
 
-      socket.emit('report_template_attached', { success: true, taskId: task._id.toString(), templateId });
+    socket.emit('report_template_attached', { success: true, taskId: task._id.toString(), templateId });
 
-      await broadcastToProject(project, 'task_updated', {
-        task:       formatTask(task),
-        updateType: 'template_attached',
+    await broadcastToProject(project, 'task_updated', {
+      task:       formatTask(task),
+      updateType: 'template_attached',
+    });
+
+    // ── 6. Build a human-readable schedule description ────────────────────
+    const scheduleDescription = buildScheduleDescription(
+      template.submissionFrequency,
+      template.reportingTime,
+    );
+
+    // ── 7. Notify each assignee via socket + push ─────────────────────────
+    debug(`attach_report_template_to_task → notifying ${task.assignedTo.length} assignee(s)`);
+    for (const assignee of task.assignedTo) {
+      const assigneeId = assignee._id?.toString() || assignee.toString();
+      log(`attach_report_template_to_task → notifying assignee ${assigneeId}`);
+
+      // Socket (online) — full template detail so the client can render the form
+      emitToUser(assigneeId, 'report_template_attached_to_your_task', {
+        task:     formatTask(task),
+        template: formatReportTemplate(template),
       });
 
-      // ── 6. Notify each assignee via socket + push ─────────────────────────
-      debug(`attach_report_template_to_task → notifying ${task.assignedTo.length} assignee(s)`);
-      for (const assignee of task.assignedTo) {
-        const assigneeId = assignee._id?.toString() || assignee.toString();
-        log(`attach_report_template_to_task → notifying assignee ${assigneeId}`);
-
-        // Socket (online)
-        emitToUser(assigneeId, 'report_template_attached_to_your_task', {
-          task:     formatTask(task),
-          template: formatReportTemplate(template),
-        });
-
-        // Push (offline / backgrounded) — fire-and-forget
-        notifyUser(assigneeId, {
-          title:    '📋 New Report Template Assigned',
-          body:     `A report template "${template.name}" has been attached to your task "${task.title}".`,
-          type:     'info',
-          priority: 'normal',
-          metadata: {
-            event:      'template_attached',
-            taskId:     taskId.toString(),
-            templateId: templateId.toString(),
-            taskTitle:  task.title,
+      // Push (offline / backgrounded)
+      notifyUser(assigneeId, {
+        title:    `📋 Report required for "${task.title}"`,
+        body:     `You must now submit ${scheduleDescription} for this task using the "${template.name}" template.`,
+        type:     'info',
+        priority: 'normal',
+        persist:  true,
+        metadata: {
+          event:             'template_attached',
+          taskId:            taskId.toString(),
+          templateId:        templateId.toString(),
+          taskTitle:         task.title,
+          templateName:      template.name,
+          submissionFrequency: template.submissionFrequency,
+          reportingTime:     template.reportingTime,
+        },
+        actions: [
+          {
+            label:     'View task',
+            deepLink:  `/tasks/${taskId}`,
+            isPrimary: true,
           },
-        }).catch(e => warn(`attach_report_template_to_task → push failed for ${assigneeId}:`, e.message));
-      }
-
-      ok(`attach_report_template_to_task → ✅ done`);
-    } catch (error) {
-      err('attach_report_template_to_task failed:', error);
-      socket.emit('tasker_error', { error: 'Failed to attach report template', details: error.message });
+        ],
+      }).catch(e =>
+        warn(`attach_report_template_to_task → push failed for ${assigneeId}:`, e.message)
+      );
     }
-  });
+
+    ok(`attach_report_template_to_task → ✅ done`);
+  } catch (error) {
+    err('attach_report_template_to_task failed:', error);
+    socket.emit('tasker_error', { error: 'Failed to attach report template', details: error.message });
+  }
+});
 
   // ==========================================
   // UPDATE REPORT TEMPLATE
@@ -527,12 +758,13 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
       }
 
       const allowed = ['name', 'description', 'columns', 'requiresApproval',
-                       'allowMultipleSubmissions', 'submissionFrequency'];
+                       'allowMultipleSubmissions', 'submissionFrequency', 'reportingTime', 'alarms'];
       for (const field of allowed) {
         if (updates[field] !== undefined) template[field] = updates[field];
       }
       template.updatedAt = new Date();
       await template.save();
+
 
       const formatted = formatReportTemplate(template);
       socket.emit('report_template_updated', { success: true, template: formatted });
@@ -718,117 +950,349 @@ module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, 
     }
   });
 
-  // ==========================================
-  // GET REPORT SUBMISSIONS
-  // ==========================================
-  socket.on('get_report_submissions', async ({
-    taskId, projectId, templateId, employeeId,
-    status, startDate, endDate, userId,
-  }) => {
-    log(`get_report_submissions → userId: ${userId}, taskId: ${taskId ?? '-'}, projectId: ${projectId ?? '-'}, templateId: ${templateId ?? '-'}, employeeId: ${employeeId ?? '-'}, status: ${status ?? 'any'}`);
 
-    try {
-      const query = { ...notDeleted() };
 
-      if (taskId)    query.taskId    = taskId;
-      if (projectId) query.projectId = projectId;
-      if (templateId) query.templateId = templateId;
-      if (status)    query.status    = status;
-      if (startDate || endDate) {
-        query.submissionDate = {};
-        if (startDate) query.submissionDate.$gte = new Date(startDate);
-        if (endDate)   query.submissionDate.$lte = new Date(endDate);
-      }
 
-      debug(`get_report_submissions → base query:`, JSON.stringify(query));
+// ==========================================
+// GET REPORT SUBMISSIONS
+// ==========================================
+socket.on('get_report_submissions', async ({
+  taskId, projectId, templateId, employeeId,
+  status, startDate, endDate, userId, businessProfileId,
+}) => {
+  log(`get_report_submissions → userId: ${userId}, taskId: ${taskId ?? '-'}, projectId: ${projectId ?? '-'}, templateId: ${templateId ?? '-'}, employeeId: ${employeeId ?? '-'}, status: ${status ?? 'any'}, businessProfileId: ${businessProfileId ?? '-'}`);
 
-      let isPrivileged     = false;
-      let managedProfileIds = [];
+  try {
+    const query = { ...notDeleted() };
 
-      if (projectId) {
-        const project = await Project.findById(projectId);
-        debug(`get_report_submissions → project lookup:`, project ? project._id : 'NOT FOUND');
+    if (taskId)     query.taskId     = taskId;
+    if (projectId)  query.projectId  = projectId;
+    if (templateId) query.templateId = templateId;
+    if (status)     query.status     = status;
+
+    if (startDate || endDate) {
+      query.submissionDate = {};
+      if (startDate) query.submissionDate.$gte = new Date(startDate);
+      if (endDate)   query.submissionDate.$lte = new Date(endDate);
+    }
+
+    debug(`get_report_submissions → base query:`, JSON.stringify(query));
+
+    let isPrivileged      = false;
+    let managedProfileIds = [];
+
+    // ── Scope 1: taskId provided — derive profile from task's project ────────
+    if (taskId && !projectId) {
+      const task = await Task.findById(taskId);
+      debug(`get_report_submissions → task lookup:`, task ? task._id : 'NOT FOUND');
+      if (task) {
+        const project = await Project.findById(task.projectId);
         if (project) {
           const profile = await BusinessProfile.findById(project.businessProfileId);
-          isPrivileged = profile ? (await isOwnerOrAdmin(profile, userId)) : false;
-          if (isPrivileged) managedProfileIds = [project.businessProfileId.toString()];
-        }
-      } else if (taskId) {
-        const task = await Task.findById(taskId);
-        debug(`get_report_submissions → task lookup:`, task ? task._id : 'NOT FOUND');
-        if (task) {
-          const project = await Project.findById(task.projectId);
-          if (project) {
-            const profile = await BusinessProfile.findById(project.businessProfileId);
-            isPrivileged = profile ? (await isOwnerOrAdmin(profile, userId)) : false;
-            if (isPrivileged) managedProfileIds = [project.businessProfileId.toString()];
-          }
-        }
-      } else {
-        // Badge fetch — check ALL profiles this user belongs to
-        log(`get_report_submissions → no taskId/projectId — checking ALL managed profiles for ${userId}`);
-
-        const user = await User.findById(userId).select('businessProfileIds');
-        debug(`get_report_submissions → user.businessProfileIds count: ${user?.businessProfileIds?.length ?? 0}`);
-
-        if (user?.businessProfileIds?.length) {
-          const profiles = await BusinessProfile.find({
-            _id: { $in: user.businessProfileIds },
-            ...notDeleted(),
-          }).select('_id ownerId members');
-
-          debug(`get_report_submissions → loaded ${profiles.length} profile(s) for role check`);
-
-          const managedProfiles = profiles.filter(profile => {
-            const role = profile.getUserRole(userId.toString());
-            return role === 'owner' || role === 'admin';
-          });
-
-          debug(`get_report_submissions → managed profiles:`, managedProfiles.map(p => p._id.toString()));
-
-          if (managedProfiles.length > 0) {
+          if (profile && (await isOwnerOrAdmin(profile, userId))) {
             isPrivileged      = true;
-            managedProfileIds = managedProfiles.map(p => p._id.toString());
-            query.businessProfileId = { $in: managedProfiles.map(p => p._id) };
+            managedProfileIds = [project.businessProfileId.toString()];
           }
         }
       }
 
-      log(`get_report_submissions → isPrivileged: ${isPrivileged}, managedProfileIds:`, managedProfileIds);
-
-      if (!isPrivileged) {
-        if (employeeId && employeeId !== userId) {
-          warn(`get_report_submissions → employee ${userId} tried to view submissions for ${employeeId} — denied`);
-          socket.emit('tasker_error', { error: 'You can only view your own submissions' });
-          return;
+    // ── Scope 2: projectId provided — derive profile from project ────────────
+    } else if (projectId) {
+      const project = await Project.findById(projectId);
+      debug(`get_report_submissions → project lookup:`, project ? project._id : 'NOT FOUND');
+      if (project) {
+        const profile = await BusinessProfile.findById(project.businessProfileId);
+        if (profile && (await isOwnerOrAdmin(profile, userId))) {
+          isPrivileged      = true;
+          managedProfileIds = [project.businessProfileId.toString()];
         }
-        query.submittedBy = userId;
-        debug(`get_report_submissions → scoping to own submissions for userId ${userId}`);
-      } else if (employeeId) {
-        query.submittedBy = employeeId;
-        debug(`get_report_submissions → privileged user scoping to employeeId ${employeeId}`);
       }
 
-      debug(`get_report_submissions → final query:`, JSON.stringify(query));
+    // ── Scope 3: specific businessProfileId provided — fast path ────────────
+    } else if (businessProfileId) {
+      query.businessProfileId = businessProfileId;
 
-      const submissions = await ReportSubmission.find(query)
-        .populate('submittedBy', 'name email profilePicture')
-        .populate('reviewedBy', 'name email')
-        .sort({ submissionDate: -1, createdAt: -1 });
+      const profile = await BusinessProfile.findById(businessProfileId);
+      if (profile && (await isOwnerOrAdmin(profile, userId))) {
+        isPrivileged      = true;
+        managedProfileIds = [businessProfileId];
+      }
 
-      ok(`get_report_submissions → found ${submissions.length} submission(s)`);
+    // ── Scope 4: no scope — load all profiles the user manages ──────────────
+    } else {
+      const user = await User.findById(userId).select('businessProfileIds');
+      debug(`get_report_submissions → user.businessProfileIds count: ${user?.businessProfileIds?.length ?? 0}`);
 
-      await emitSubmissionsList({
-        target: socket,
-        isSocket: true,
-        submissions,
-        managedProfileIds,
-      });
-    } catch (error) {
-      err('get_report_submissions failed:', error);
-      socket.emit('tasker_error', { error: 'Failed to fetch report submissions' });
+      if (user?.businessProfileIds?.length) {
+        const profiles = await BusinessProfile.find({
+          _id: { $in: user.businessProfileIds },
+          ...notDeleted(),
+        }).select('_id ownerId members');
+
+        debug(`get_report_submissions → loaded ${profiles.length} profile(s) for role check`);
+
+        const managedProfiles = profiles.filter(profile => {
+          const role = profile.getUserRole(userId.toString());
+          return role === 'owner' || role === 'admin';
+        });
+
+        debug(`get_report_submissions → managed profiles:`, managedProfiles.map(p => p._id.toString()));
+
+        if (managedProfiles.length > 0) {
+          isPrivileged      = true;
+          managedProfileIds = managedProfiles.map(p => p._id.toString());
+          query.businessProfileId = { $in: managedProfiles.map(p => p._id) };
+        }
+      }
     }
-  });
+
+    log(`get_report_submissions → isPrivileged: ${isPrivileged}, managedProfileIds:`, managedProfileIds);
+
+    // ── submittedBy guard ────────────────────────────────────────────────────
+    if (!isPrivileged) {
+      if (employeeId && employeeId !== userId) {
+        warn(`get_report_submissions → employee ${userId} tried to view submissions for ${employeeId} — denied`);
+        socket.emit('tasker_error', { error: 'You can only view your own submissions' });
+        return;
+      }
+      query.submittedBy = userId;
+      debug(`get_report_submissions → scoping to own submissions for userId ${userId}`);
+    } else if (employeeId) {
+      query.submittedBy = employeeId;
+      debug(`get_report_submissions → privileged user scoping to employeeId ${employeeId}`);
+    }
+
+    debug(`get_report_submissions → final query:`, JSON.stringify(query));
+
+    const submissions = await ReportSubmission.find(query)
+      .populate('submittedBy', 'name email profilePicture')
+      .populate('reviewedBy', 'name email')
+      .sort({ submissionDate: -1, createdAt: -1 });
+
+    ok(`get_report_submissions → found ${submissions.length} submission(s)`);
+
+    await emitSubmissionsList({
+      target: socket,
+      isSocket: true,
+      submissions,
+      managedProfileIds,
+      userId,
+    });
+
+  } catch (error) {
+    err('get_report_submissions failed:', error);
+    socket.emit('tasker_error', { error: 'Failed to fetch report submissions' });
+  }
+});
+
+
+  // ==========================================
+// GET REPORT COMPLIANCE
+// ==========================================
+ 
+socket.on('get_report_compliance', async ({ taskId, templateId, startDate, endDate, userId }) => {
+  log(`get_report_compliance → userId: ${userId}, taskId: ${taskId}, templateId: ${templateId}`);
+ 
+  try {
+    // ── 1. Task lookup ──────────────────────────────────────────────────────
+    const task = await Task.findById(taskId);
+    if (!task) {
+      warn(`get_report_compliance → task ${taskId} NOT FOUND`);
+      socket.emit('tasker_error', { error: 'Task not found' });
+      return;
+    }
+ 
+    // ── 2. Permission check — owner / admin only ────────────────────────────
+    const profile = await BusinessProfile.findById(
+      task.businessProfileId || (await Project.findById(task.projectId))?.businessProfileId
+    );
+ 
+    if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+      warn(`get_report_compliance → access denied for userId ${userId}`);
+      socket.emit('tasker_error', { error: 'Only owner or admin can view compliance data' });
+      return;
+    }
+ 
+    // ── 3. Template lookup ──────────────────────────────────────────────────
+    const template = await ReportTemplate.findById(templateId);
+    if (!template) {
+      warn(`get_report_compliance → template ${templateId} NOT FOUND`);
+      socket.emit('tasker_error', { error: 'Template not found' });
+      return;
+    }
+ 
+    // ── 4. Resolve date range ───────────────────────────────────────────────
+    // Default: task startDate → today (or task dueDate if it's in the past)
+    const rangeStart = startDate
+      ? new Date(startDate)
+      : (task.startDate ? new Date(task.startDate) : new Date(task.createdAt));
+ 
+    const now        = new Date();
+    const taskDue    = task.dueDate ? new Date(task.dueDate) : null;
+    const rangeEnd   = endDate
+      ? new Date(endDate)
+      : (taskDue && taskDue < now ? taskDue : now);
+ 
+    // Ensure rangeStart is at the very beginning of the day
+    rangeStart.setHours(0, 0, 0, 0);
+ 
+    debug(`get_report_compliance → range: ${rangeStart.toISOString()} → ${rangeEnd.toISOString()}`);
+    debug(`get_report_compliance → frequency: "${template.submissionFrequency}", reportingTime: "${template.reportingTime}"`);
+ 
+    // ── 5. Generate expected periods ────────────────────────────────────────
+    const expectedPeriods = generateExpectedPeriods(
+      template.submissionFrequency,
+      rangeStart,
+      rangeEnd,
+      template.reportingTime,
+    );
+    log(`get_report_compliance → ${expectedPeriods.length} expected period(s)`);
+ 
+    // ── 6. Fetch all submissions for this task+template ─────────────────────
+    const submissions = await ReportSubmission.find({
+      taskId,
+      templateId,
+      ...notDeleted(),
+    })
+      .populate('submittedBy', 'name email profilePicture')
+      .sort({ submissionDate: 1, createdAt: 1 });
+ 
+    log(`get_report_compliance → ${submissions.length} submission(s) found`);
+ 
+    // ── 7. Resolve assignee details ─────────────────────────────────────────
+    const assigneeIds = (task.assignedTo || []).map(a =>
+      (a._id || a).toString()
+    );
+    debug(`get_report_compliance → assignees:`, assigneeIds);
+ 
+    const assigneeUsers = await User.find({
+      _id: { $in: assigneeIds },
+    }).select('_id name email profilePicture').lean();
+ 
+    const assigneeMap = {};
+    for (const u of assigneeUsers) {
+      assigneeMap[u._id.toString()] = u;
+    }
+ 
+    // ── 8. Build compliance matrix ──────────────────────────────────────────
+    //
+    // Structure:
+    //   complianceMatrix[assigneeId][periodIndex] = submission | null
+    //
+    // A submission "covers" a period when its submissionDate falls within
+    // [periodStart, periodEnd].  For per-task frequency the single period
+    // covers the whole range, so any submission qualifies.
+ 
+    // Group submissions by assignee
+    const subsByAssignee = {};
+    for (const sub of submissions) {
+      const sid = (sub.submittedBy._id || sub.submittedBy).toString();
+      if (!subsByAssignee[sid]) subsByAssignee[sid] = [];
+      subsByAssignee[sid].push(sub);
+    }
+ 
+    const assigneeSummaries = [];
+    let totalActualSubmissions = 0;
+ 
+    for (const assigneeId of assigneeIds) {
+      const userInfo = assigneeMap[assigneeId];
+      const mySubs   = subsByAssignee[assigneeId] || [];
+ 
+      // Map period index → best submission (prefer approved > submitted > draft > rejected)
+      const statusPriority = { approved: 4, submitted: 3, draft: 2, rejected: 1 };
+      const periodMap = {}; // index → submission
+ 
+      for (const sub of mySubs) {
+        const dateToCheck = sub.submittedAt || sub.submissionDate || sub.createdAt;
+        const idx = findMatchingPeriodIndex(dateToCheck, expectedPeriods);
+        if (idx === -1) continue; // outside range
+ 
+        const existing = periodMap[idx];
+        if (!existing) {
+          periodMap[idx] = sub;
+        } else {
+          // Keep the higher-priority status
+          const newPriority = statusPriority[sub.status]      || 0;
+          const oldPriority = statusPriority[existing.status] || 0;
+          if (newPriority > oldPriority) periodMap[idx] = sub;
+        }
+      }
+ 
+      // Build per-period compliance rows
+      const periodRows = expectedPeriods.map((period, idx) => {
+        const sub       = periodMap[idx] || null;
+        const submitted = sub !== null;
+ 
+        return {
+          assigneeId,
+          assigneeName:           userInfo?.name           || null,
+          assigneeEmail:          userInfo?.email          || null,
+          assigneeProfilePicture: userInfo?.profilePicture || null,
+          period,
+          submitted,
+          submission: sub ? {
+            submissionId: sub._id.toString(),
+            submittedAt:  (sub.submittedAt || sub.submissionDate || sub.createdAt).toISOString(),
+            status:       sub.status,
+          } : null,
+        };
+      });
+ 
+      const submittedPeriods = periodRows.filter(r => r.submitted).length;
+      const approvedPeriods  = periodRows.filter(r => r.submission?.status === 'approved').length;
+      const rejectedPeriods  = periodRows.filter(r => r.submission?.status === 'rejected').length;
+      const missingPeriods   = expectedPeriods.length - submittedPeriods;
+ 
+      totalActualSubmissions += submittedPeriods;
+ 
+      assigneeSummaries.push({
+        assigneeId,
+        assigneeName:           userInfo?.name           || null,
+        assigneeEmail:          userInfo?.email          || null,
+        assigneeProfilePicture: userInfo?.profilePicture || null,
+        totalPeriods:     expectedPeriods.length,
+        submittedPeriods,
+        approvedPeriods,
+        rejectedPeriods,
+        missingPeriods,
+        periods: periodRows,
+      });
+    }
+ 
+    // ── 9. Overall compliance rate ──────────────────────────────────────────
+    const totalExpected = assigneeIds.length * expectedPeriods.length;
+    const overallRate   = totalExpected > 0
+      ? (totalActualSubmissions / totalExpected) * 100
+      : 100;
+ 
+    ok(`get_report_compliance → overall rate: ${overallRate.toFixed(1)}%, `
+      + `expected: ${totalExpected}, actual: ${totalActualSubmissions}`);
+ 
+    // ── 10. Emit ────────────────────────────────────────────────────────────
+    socket.emit('report_compliance_data', {
+      success: true,
+      compliance: {
+        taskId:              taskId.toString(),
+        templateId:          templateId.toString(),
+        templateName:        template.name,
+        submissionFrequency: template.submissionFrequency,
+        reportingTime:       template.reportingTime ?? '18:00',
+        rangeStart:          rangeStart.toISOString(),
+        rangeEnd:            rangeEnd.toISOString(),
+        expectedPeriods,
+        assignees:                  assigneeSummaries,
+        totalAssignees:             assigneeIds.length,
+        totalExpectedSubmissions:   totalExpected,
+        totalActualSubmissions,
+        overallComplianceRate:      parseFloat(overallRate.toFixed(2)),
+      },
+    });
+ 
+  } catch (error) {
+    err('get_report_compliance failed:', error);
+    socket.emit('tasker_error', { error: 'Failed to generate compliance report', details: error.message });
+  }
+});
 
   // ==========================================
   // APPROVE REPORT SUBMISSION

@@ -25,15 +25,26 @@ exports.createScheduledMessage = async (req, res) => {
     }
 
 const scheduledDate = new Date(scheduledFor);
-if (scheduledDate < new Date()) {
-  const now = new Date();
+
+if (isNaN(scheduledDate.getTime())) {
+  return res.status(400).json({
+    success: false,
+    message: 'scheduledFor is not a valid date',
+  });
+}
+
+const now = new Date();
+const bufferMs = 10_000; // 10-second buffer for clock skew / network delay
+
+if (scheduledDate.getTime() < now.getTime() + bufferMs) {
   console.log(
-    `Attempted to schedule message in the past, current date is ${now.toLocaleString()}, scheduled date is ${scheduledDate.toLocaleString()}`
+    `Attempted to schedule message in the past, current date is ${now.toISOString()}, scheduled date is ${scheduledDate.toISOString()}`
   );
   return res.status(400).json({
     success: false,
-    message: 'scheduledFor must be a future date',
+    message: 'scheduledFor must be at least 10 seconds in the future',
   });
+
 }
 
     const scheduled = await ScheduledMessage.create({

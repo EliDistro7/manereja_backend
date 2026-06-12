@@ -7,6 +7,7 @@ const ReportTemplate = require('../../models/manereja/report-template.js');
 const BusinessProfile = require('../../models/manereja/business-profile.js');
 const ProjectInvitation = require('../../models/manereja/project-invitation.js');
 const User = require('../../models/manereja/user.js');
+const { notifyUser } = require('../../services/businessNotificationService');
 const {
   validateTaskWeight,
   updateProjectProgress,
@@ -16,26 +17,7 @@ const {
 } = require('./taskerHelper');
 
 
-async function notifyAssigneeOfTaskTemplate({task, newAssigneeIds, formatReportTemplate, formatTask}) {
-  const templateId = task.metadata?.get?.('reportTemplateId') 
-    ?? (task.metadata instanceof Map 
-        ? task.metadata.get('reportTemplateId') 
-        : task.metadata?.reportTemplateId);
-  if (!templateId) return;
 
-  const template = await ReportTemplate.findById(templateId);
-  if (!template) return;
-
-  const formattedTemplate = formatReportTemplate(template);
-  const formattedTask    = formatTask(task);
-
-  for (const assigneeId of newAssigneeIds) {
-    emitToUser(assigneeId, 'report_template_attached_to_your_task', {
-      task: formattedTask,
-      template: formattedTemplate,
-    });
-  }
-}
 
 // ─── Shared helper: matches docs where isDeleted is false OR field doesn't exist ─
 // Fixes silent data loss on older documents that never had isDeleted set.
@@ -45,6 +27,86 @@ function notDeleted() {
 // ────────────────────────────────────────────────────────────────────────────
 
 module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, socketToUser) {
+
+// ── place this right after the emitToUser function definition ──────────────
+
+function formatReportTemplate(template) {
+  return {
+    _id:                      template._id.toString(),
+    id:                       template._id.toString(),
+    projectId:                template.projectId.toString(),
+    businessProfileId:        template.businessProfileId.toString(),
+    createdBy:                template.createdBy.toString(),
+    name:                     template.name,
+    description:              template.description,
+    columns:                  template.columns,
+    requiresApproval:         template.requiresApproval,
+    allowMultipleSubmissions: template.allowMultipleSubmissions,
+    submissionFrequency:      template.submissionFrequency,
+    reportingTime:            template.reportingTime,
+    createdAt:                template.createdAt,
+    updatedAt:                template.updatedAt,
+  };
+}
+
+
+async function notifyAssigneeOfTaskTemplate(task, newAssigneeIds) {
+  const templateId = task.metadata?.get?.('reportTemplateId')
+    ?? (task.metadata instanceof Map
+        ? task.metadata.get('reportTemplateId')
+        : task.metadata?.reportTemplateId);
+  if (!templateId) return;
+
+  const template = await ReportTemplate.findById(templateId);
+  if (!template) return;
+
+  const formattedTemplate = formatReportTemplate(template);
+  const formattedTask     = formatTask(task);
+
+  const scheduleDescription = buildScheduleDescription(
+    template.submissionFrequency,
+    template.reportingTime,
+  );
+
+  for (const assigneeId of newAssigneeIds) {
+    // Socket (online)
+    emitToUser(assigneeId, 'report_template_attached_to_your_task', {
+      task:     formattedTask,
+      template: formattedTemplate,
+    });
+
+    // Push (offline / backgrounded)
+    notifyUser(assigneeId, {
+      title:    `📋 Report required for "${task.title}"`,
+      body:     `You must submit ${scheduleDescription} using the "${template.name}" template.`,
+      type:     'info',
+      priority: 'normal',
+      persist:  true,
+      metadata: {
+        event:               'template_attached',
+        taskId:              task._id.toString(),
+        templateId:          templateId.toString(),
+        taskTitle:           task.title,
+        templateName:        template.name,
+        submissionFrequency: template.submissionFrequency,
+        reportingTime:       template.reportingTime,
+      },
+      actions: [{ label: 'View task', deepLink: `/tasks/${task._id}`, isPrimary: true }],
+    }).catch(e => console.warn(`[taskerEvents] push failed for ${assigneeId}:`, e.message));
+  }
+}
+
+function buildScheduleDescription(frequency, reportingTime) {
+  const time = reportingTime ?? '18:00';
+  switch (frequency) {
+    case 'daily':    return `a daily report by ${time}`;
+    case 'weekly':   return `a weekly report by ${time}`;
+    case 'monthly':  return `a monthly report by ${time}`;
+    case 'per-task': return 'a report when the task is completed';
+    default:         return `a ${frequency} report by ${time}`;
+  }
+}
+
 
   // ==========================================
   // GET PROJECTS LIST
@@ -351,7 +413,7 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
       await newTask.populate('assignedTo', 'name email profilePicture');
       await newTask.populate('createdBy', 'name email');
 
-      await notifyAssigneeOfTaskTemplate({task: newTask, newAssigneeIds: assignees, formatReportTemplate, formatTask});
+      await notifyAssigneeOfTaskTemplate(newTask, assignees);
 
       const formattedTask = formatTask(newTask);
       const updatedProject = await updateProjectProgress(projectId);
@@ -424,6 +486,11 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
       task.assignedTo = newAssignees;
       task.updatedAt = new Date();
       await task.save();
+        
+      // ✅ Notify newly added assignees of any attached report template
+      const added = newAssignees.filter(id => !oldAssignees.includes(id));
+      if (added.length > 0) await notifyAssigneeOfTaskTemplate(task, added);
+      
       await task.populate('assignedTo', 'name email profilePicture');
       await task.populate('createdBy', 'name email');
 
@@ -433,13 +500,7 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
         task: formattedTask, oldAssignees, newAssignees, assignedBy: userId,
       });
 
-      const added = newAssignees.filter(id => !oldAssignees.includes(id));
-      for (const id of added) {
-        emitToUser(id, 'task_assigned_to_you', {
-          task: formattedTask, assignedBy: userId,
-          message: `You've been assigned to task: ${task.title}`,
-        });
-      }
+   
 
       const removed = oldAssignees.filter(id => !newAssignees.includes(id));
       for (const id of removed) {
@@ -499,7 +560,7 @@ module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, 
       task.assignedTo.push(assigneeId);
       task.updatedAt = new Date();
       await task.save();
-      await notifyAssigneeOfTaskTemplate({task, newAssigneeIds: [assigneeId], formatReportTemplate, formatTask});
+      await notifyAssigneeOfTaskTemplate(task, [assigneeId]);
       await task.populate('assignedTo', 'name email profilePicture');
       await task.populate('createdBy', 'name email');
 

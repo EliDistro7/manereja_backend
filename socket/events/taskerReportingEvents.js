@@ -7,10 +7,38 @@ const {
   generateCommentActivityReport,
 } = require('./taskerReportingHelper');
 
+// ─── Shared helper: matches docs where isDeleted is false OR field doesn't exist ─
+function notDeleted() {
+  return { $or: [{ isDeleted: false }, { isDeleted: { $exists: false } }] };
+}
+
+// ─── Helper: check if user is owner or admin (same as taskerEvents) ─────────
+async function isOwnerOrAdmin(profile, userId) {
+  if (!profile) return false;
+  if (profile.ownerId?.toString() === userId?.toString()) return true;
+  
+  // profile.members is a Mongoose Map — must use .get(), not bracket notation
+  const member = profile.members instanceof Map
+    ? profile.members.get(userId?.toString())
+    : (profile.members || {})[userId?.toString()];
+  
+  return member?.role === 'admin';
+}
+
+// ─── Helper: emit to all sockets of a user (multi-tab safe) ─────────────────
+function emitToUser(userSockets, io, userId, event, data) {
+  const sockets = userSockets[userId];
+  if (!sockets || sockets.size === 0) return false;
+  for (const socketId of sockets) {
+    io.to(socketId).emit(event, data);
+  }
+  return true;
+}
+
 module.exports = function taskerReportingEvents(io, socket, userSockets, roomSocketsMap, socketToUser) {
   
   // ==========================================
-  // GET PROJECT PROGRESS REPORT (Owner only)
+  // GET PROJECT PROGRESS REPORT (Owner/Admin)
   // ==========================================
   socket.on('get_project_report', async ({ 
     projectId,
@@ -22,14 +50,15 @@ module.exports = function taskerReportingEvents(io, socket, userSockets, roomSoc
     userId 
   }) => {
     try {
-      // Validate user is owner
+      // Validate user is owner or admin
       const profile = await BusinessProfile.findById(businessProfileId);
-      if (!profile || profile.ownerId.toString() !== userId) {
-        console.log('only owner can generate reports');
-        socket.emit('tasker_error', { error: 'Only owner can generate reports' });
+      if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+        console.log('❌ Only owner or admin can generate project reports');
+        socket.emit('tasker_error', { error: 'Only owner or admin can generate project reports' });
         return;
       }
-     console.log('it reached here in creating project report')
+      
+      console.log('✅ Generating project report for user:', userId);
       const report = await generateProjectProgressReport(projectId, {
         startDate,
         endDate,
@@ -41,7 +70,7 @@ module.exports = function taskerReportingEvents(io, socket, userSockets, roomSoc
         report,
         success: true,
       });
-      console.log('report sent to frontend', report);
+      console.log('📊 Project report sent to frontend');
 
     } catch (error) {
       console.error('❌ Error generating project report:', error);
@@ -53,7 +82,7 @@ module.exports = function taskerReportingEvents(io, socket, userSockets, roomSoc
   });
 
   // ==========================================
-  // GET EMPLOYEE PERFORMANCE REPORT (Owner only)
+  // GET EMPLOYEE PERFORMANCE REPORT (Owner/Admin)
   // ==========================================
   socket.on('get_employee_report', async ({ 
     employeeId,
@@ -66,16 +95,16 @@ module.exports = function taskerReportingEvents(io, socket, userSockets, roomSoc
     userId 
   }) => {
     try {
-      // Validate user is owner
+      // Validate user is owner or admin
       const profile = await BusinessProfile.findById(businessProfileId);
-      if (!profile || profile.ownerId.toString() !== userId) {
-        socket.emit('tasker_error', { error: 'Only owner can generate employee reports' });
+      if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+        socket.emit('tasker_error', { error: 'Only owner or admin can generate employee reports' });
         return;
       }
 
       // Validate employee is in the business profile
       if (!profile.hasAccess(employeeId)) {
-        console.log('employee id, has no access, ', employeeId);
+        console.log('❌ Employee has no access to this business profile:', employeeId);
         socket.emit('tasker_error', { error: 'Employee not found in business profile' });
         return;
       }
@@ -88,7 +117,7 @@ module.exports = function taskerReportingEvents(io, socket, userSockets, roomSoc
         includeTaskDetails,
       });
 
-      console.log('employee report', report);
+      console.log('📊 Employee report generated for:', employeeId);
 
       socket.emit('employee_report_generated', {
         report,
@@ -105,7 +134,7 @@ module.exports = function taskerReportingEvents(io, socket, userSockets, roomSoc
   });
 
   // ==========================================
-  // GET TEAM ANALYTICS REPORT (Owner only)
+  // GET TEAM ANALYTICS REPORT (Owner/Admin)
   // ==========================================
   socket.on('get_team_analytics', async ({ 
     businessProfileId,
@@ -115,10 +144,10 @@ module.exports = function taskerReportingEvents(io, socket, userSockets, roomSoc
     userId 
   }) => {
     try {
-      // Validate user is owner
+      // Validate user is owner or admin
       const profile = await BusinessProfile.findById(businessProfileId);
-      if (!profile || profile.ownerId.toString() !== userId) {
-        socket.emit('tasker_error', { error: 'Only owner can view team analytics' });
+      if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+        socket.emit('tasker_error', { error: 'Only owner or admin can view team analytics' });
         return;
       }
 
@@ -133,7 +162,7 @@ module.exports = function taskerReportingEvents(io, socket, userSockets, roomSoc
         success: true,
       });
 
-      console.log('analytics report', report);
+      console.log('📊 Team analytics report generated');
 
     } catch (error) {
       console.error('❌ Error generating team analytics:', error);
@@ -145,7 +174,7 @@ module.exports = function taskerReportingEvents(io, socket, userSockets, roomSoc
   });
 
   // ==========================================
-  // GET COMMENT ACTIVITY REPORT (Owner only)
+  // GET COMMENT ACTIVITY REPORT (Owner/Admin)
   // ==========================================
   socket.on('get_comment_activity_report', async ({ 
     businessProfileId,
@@ -156,10 +185,10 @@ module.exports = function taskerReportingEvents(io, socket, userSockets, roomSoc
     userId 
   }) => {
     try {
-      // Validate user is owner
+      // Validate user is owner or admin
       const profile = await BusinessProfile.findById(businessProfileId);
-      if (!profile || profile.ownerId.toString() !== userId) {
-        socket.emit('tasker_error', { error: 'Only owner can view comment reports' });
+      if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+        socket.emit('tasker_error', { error: 'Only owner or admin can view comment reports' });
         return;
       }
 
@@ -175,6 +204,8 @@ module.exports = function taskerReportingEvents(io, socket, userSockets, roomSoc
         success: true,
       });
 
+      console.log('📊 Comment activity report generated');
+
     } catch (error) {
       console.error('❌ Error generating comment activity report:', error);
       socket.emit('tasker_error', { 
@@ -185,7 +216,7 @@ module.exports = function taskerReportingEvents(io, socket, userSockets, roomSoc
   });
 
   // ==========================================
-  // GET MULTIPLE EMPLOYEE REPORTS (Owner only)
+  // GET MULTIPLE EMPLOYEE REPORTS (Owner/Admin)
   // Useful for comparing multiple employees
   // ==========================================
   socket.on('get_bulk_employee_reports', async ({ 
@@ -197,10 +228,10 @@ module.exports = function taskerReportingEvents(io, socket, userSockets, roomSoc
     userId 
   }) => {
     try {
-      // Validate user is owner
+      // Validate user is owner or admin
       const profile = await BusinessProfile.findById(businessProfileId);
-      if (!profile || profile.ownerId.toString() !== userId) {
-        socket.emit('tasker_error', { error: 'Only owner can generate bulk reports' });
+      if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+        socket.emit('tasker_error', { error: 'Only owner or admin can generate bulk reports' });
         return;
       }
 
@@ -257,6 +288,8 @@ module.exports = function taskerReportingEvents(io, socket, userSockets, roomSoc
         success: true,
       });
 
+      console.log('📊 Bulk employee reports generated for', employeeIds.length, 'employees');
+
     } catch (error) {
       console.error('❌ Error generating bulk employee reports:', error);
       socket.emit('tasker_error', { 
@@ -267,7 +300,7 @@ module.exports = function taskerReportingEvents(io, socket, userSockets, roomSoc
   });
 
   // ==========================================
-  // GET PRODUCTIVITY TIMELINE (Owner only)
+  // GET PRODUCTIVITY TIMELINE (Owner/Admin)
   // Shows productivity trends over time
   // ==========================================
   socket.on('get_productivity_timeline', async ({ 
@@ -280,19 +313,19 @@ module.exports = function taskerReportingEvents(io, socket, userSockets, roomSoc
     userId 
   }) => {
     try {
-      // Validate user is owner
+      // Validate user is owner or admin
       const profile = await BusinessProfile.findById(businessProfileId);
-      if (!profile || profile.ownerId.toString() !== userId) {
-        socket.emit('tasker_error', { error: 'Only owner can view productivity timeline' });
+      if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+        socket.emit('tasker_error', { error: 'Only owner or admin can view productivity timeline' });
         return;
       }
 
       const Task = require('../../models/manereja/task.js');
 
-      // Build query
+      // Build query with notDeleted filter for consistency
       const query = {
         businessProfileId,
-        isDeleted: false,
+        ...notDeleted(),
       };
 
       if (employeeId) query.assignedTo = employeeId;
@@ -377,6 +410,8 @@ module.exports = function taskerReportingEvents(io, socket, userSockets, roomSoc
         success: true,
       });
 
+      console.log('📊 Productivity timeline generated with interval:', interval);
+
     } catch (error) {
       console.error('❌ Error generating productivity timeline:', error);
       socket.emit('tasker_error', { 
@@ -387,16 +422,24 @@ module.exports = function taskerReportingEvents(io, socket, userSockets, roomSoc
   });
 
   // ==========================================
-  // EXPORT REPORT TO FILE (Owner only)
+  // EXPORT REPORT TO FILE (Owner/Admin)
   // Returns formatted data for CSV/Excel export
   // ==========================================
   socket.on('export_report', async ({ 
     reportType, // 'project', 'employee', 'team'
     reportData,
     format = 'json', // 'json', 'csv'
+    businessProfileId,
     userId 
   }) => {
     try {
+      // Validate user is owner or admin
+      const profile = await BusinessProfile.findById(businessProfileId);
+      if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+        socket.emit('tasker_error', { error: 'Only owner or admin can export reports' });
+        return;
+      }
+
       // Note: Actual file generation should be done client-side
       // This just formats the data appropriately
 
@@ -416,6 +459,8 @@ module.exports = function taskerReportingEvents(io, socket, userSockets, roomSoc
         reportType,
         success: true,
       });
+
+      console.log('📊 Report export prepared for type:', reportType);
 
     } catch (error) {
       console.error('❌ Error exporting report:', error);

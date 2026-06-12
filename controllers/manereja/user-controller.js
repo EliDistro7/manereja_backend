@@ -6,6 +6,12 @@ const Service = require('../../models/manereja/service.js'); // Adjust path as n
 const UserService = require('../../models/manereja/services.js'); // Adjust path as needed
 const { validationResult } = require('express-validator');
 const BusinessProfile = require('../../models/manereja/business-profile.js');
+const { OAuth2Client } = require('google-auth-library');
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+
+
+
+
 
 
 
@@ -50,6 +56,16 @@ class UserController {
       { expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '30d' }
     );
   }
+
+  // ── helper (private) ──────────────────────────────────────────────────
+async _verifyGoogleToken(idToken) {
+  const ticket = await googleClient.verifyIdToken({
+    idToken,
+    audience: process.env.GOOGLE_CLIENT_ID,
+  });
+  return ticket.getPayload(); // { sub, email, name, picture, email_verified }
+}
+
 
 
 // Fixed Switch active profile method
@@ -314,6 +330,91 @@ static deleteUserByEmail = async (email) => {
     return this.errorResponse(res, 'An error occurred during sign in', 500);
   }
 }
+
+
+
+// ── Sign in with Google ───────────────────────────────────────────────
+googleSignIn = async (req, res) => {
+  try {
+    const { idToken } = req.body;
+    if (!idToken) return this.errorResponse(res, 'idToken is required', 400);
+
+    let payload;
+    try {
+      payload = await this._verifyGoogleToken(idToken);
+    } catch {
+      return this.errorResponse(res, 'Invalid Google token', 401);
+    }
+
+    const { sub: googleId, email, name, picture, email_verified } = payload;
+
+    let user = await User.findOne({ $or: [{ googleId }, { email: email.toLowerCase() }] });
+    if (!user) {
+      return this.errorResponse(res, 'No account found. Please sign up first.', 404);
+    }
+
+    // Merge Google identity onto an existing local account
+    if (!user.googleId) {
+      user.googleId = googleId;
+      user.authType = 'google';
+      if (picture && !user.profilePicture) user.profilePicture = picture;
+      if (email_verified) user.isEmailVerified = true;
+      await user.save();
+    }
+
+    const token = this.generateToken(user._id);
+    const refreshToken = this.generateRefreshToken(user._id);
+    return this.successResponse(res, 'Google sign in successful', { user: user.toJSON(), token, refreshToken });
+
+  } catch (error) {
+    console.error('googleSignIn error:', error);
+    return this.errorResponse(res, 'Google sign in failed', 500);
+  }
+};
+
+// ── Sign up with Google ───────────────────────────────────────────────
+googleSignUp = async (req, res) => {
+  try {
+    const { idToken } = req.body;
+    if (!idToken) return this.errorResponse(res, 'idToken is required', 400);
+
+    let payload;
+    try {
+      payload = await this._verifyGoogleToken(idToken);
+    } catch {
+      return this.errorResponse(res, 'Invalid Google token', 401);
+    }
+
+    const { sub: googleId, email, name, picture, email_verified } = payload;
+
+    // If user already exists, just sign them in
+    let user = await User.findOne({ $or: [{ googleId }, { email: email.toLowerCase() }] });
+    const isNewUser = !user;
+
+    if (!user) {
+      user = new User({
+        email: email.toLowerCase(),
+        name,
+        googleId,
+        authType: 'google',
+        profilePicture: picture,
+        isEmailVerified: email_verified ?? true,
+      });
+      await user.save();
+      await this.initializeUserSettingsAndServices(user._id, user.subscriptionType);
+    }
+
+    const token = this.generateToken(user._id);
+    const refreshToken = this.generateRefreshToken(user._id);
+    return this.successResponse(res, 'Google sign up successful', {
+      user: user.toJSON(), token, refreshToken, isNewUser
+    }, isNewUser ? 201 : 200);
+
+  } catch (error) {
+    console.error('googleSignUp error:', error);
+    return this.errorResponse(res, 'Google sign up failed', 500);
+  }
+};
 
   deleteAll = async()=>{
     try{

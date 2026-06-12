@@ -2,6 +2,7 @@
 const UserBackup = require('../../models/manereja/user-backup');
 const BusinessProfile = require('../../models/manereja/business-profile');
 const ManerejaUser = require('../../models/manereja/user');
+const { notifyUser } = require('../../services/businessNotificationService');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // roomSocketsMap shape:
@@ -346,7 +347,9 @@ module.exports = function profileSyncEvents(io, socket, userSockets, roomSockets
   // ── Stats computed inline — no second DB write.
   // ── Payload size validated before any DB work.
   // ==========================================
-  socket.on('push_changes', async ({
+  
+  
+socket.on('push_changes', async ({
     profileId,
     userId,
     data,
@@ -381,7 +384,7 @@ module.exports = function profileSyncEvents(io, socket, userSockets, roomSockets
         : data;
 
       // ── Stats computed before the DB call ──
-      const stats     = computeStats(effectiveData);
+      const stats      = computeStats(effectiveData);
       const setPayload = buildDataSetPayload(effectiveData);
       setPayload['stats.totalBoxes'] = stats.totalBoxes;
       setPayload['stats.totalItems'] = stats.totalItems;
@@ -398,9 +401,10 @@ module.exports = function profileSyncEvents(io, socket, userSockets, roomSockets
         { upsert: true, new: true, runValidators: false },
       );
 
-      const roomName     = `profile_${profileId}`;
+      const roomName      = `profile_${profileId}`;
       const affectedBoxes = Object.keys(effectiveData);
-      const notification = {
+
+      socket.to(roomName).emit('changes_available', {
         profileId,
         pushedBy:   userIdStr,
         changeType,
@@ -409,9 +413,8 @@ module.exports = function profileSyncEvents(io, socket, userSockets, roomSockets
         stats:      updatedBackup.stats,
         metadata,
         hasChanges: true,
-      };
+      });
 
-      socket.to(roomName).emit('changes_available', notification);
       socket.emit('push_success', {
         profileId,
         changeType,
@@ -423,6 +426,67 @@ module.exports = function profileSyncEvents(io, socket, userSockets, roomSockets
 
       console.log(`✅ Push done — ${affectedBoxes.length} boxes, ${stats.totalItems} items, ${(stats.rawSize / 1024).toFixed(1)} KB`);
 
+      // ── Push-notify OFFLINE members only ─────────────────────────────────
+      // Online members already received 'changes_available' via socket above.
+      // Only members not currently in the room need a push notification.
+      try {
+        const room           = roomSocketsMap[roomName];
+        const onlineMemberIds = room ? new Set([...room.userIds]) : new Set();
+        const pusherInfo     = room?.userInfo.get(userIdStr);
+        const pusherName     = pusherInfo?.userName ?? 'A team member';
+
+        const fullProfile = await BusinessProfile.findById(profileId)
+          .select('ownerId members name')
+          .lean();
+
+        if (fullProfile) {
+          const membersObj = fullProfile.members instanceof Map
+            ? Object.fromEntries(fullProfile.members)
+            : (fullProfile.members || {});
+
+          const allMemberIds = [
+            fullProfile.ownerId.toString(),
+            ...Object.keys(membersObj),
+          ].filter((id, i, arr) => arr.indexOf(id) === i); // dedupe
+
+          const offlineMemberIds = allMemberIds.filter(id =>
+            id !== userIdStr && !onlineMemberIds.has(id)
+          );
+
+          if (offlineMemberIds.length > 0) {
+            const profileName = fullProfile.name ?? 'your profile';
+            const boxSummary  = affectedBoxes.length <= 3
+              ? affectedBoxes.join(', ')
+              : `${affectedBoxes.slice(0, 3).join(', ')} +${affectedBoxes.length - 3} more`;
+
+            await Promise.allSettled(offlineMemberIds.map(memberId =>
+              notifyUser(memberId, {
+                title:    `🔼 ${pusherName} synced data`,
+                body:     `${pusherName} pushed ${changeType === 'selective' ? 'selective' : 'full'} changes to "${profileName}" — ${stats.totalItems} item(s) across ${boxSummary}.`,
+                type:     'alert',
+                priority: 'normal',
+                persist:  true,
+                metadata: {
+                  event:      'data_pushed',
+                  profileId:  profileId.toString(),
+                  pushedBy:   userIdStr,
+                  pusherName,
+                  changeType,
+                  boxNames:   affectedBoxes.join(','),
+                  totalItems: String(stats.totalItems),
+                },
+              }).catch(e => console.warn(`[profileSync] push notify failed for ${memberId}:`, e.message))
+            ));
+
+            console.log(`📲 Push notified ${offlineMemberIds.length} offline member(s)`);
+          } else {
+            console.log(`📲 All members online — no push notifications needed`);
+          }
+        }
+      } catch (notifyErr) {
+        console.warn('[profileSync] push_changes notify block failed (non-fatal):', notifyErr.message);
+      }
+
     } catch (error) {
       console.error('❌ Error pushing changes:', error);
       socket.emit('profile_sync_error', {
@@ -432,59 +496,105 @@ module.exports = function profileSyncEvents(io, socket, userSockets, roomSockets
     }
   });
 
+
   // ==========================================
   // PULL CHANGES
   // ==========================================
- socket.on('pull_changes', async ({ profileId, userId, boxNames = [], lastSyncTime = null }) => {
-  try {
-    if (!userId || !profileId) {
-      socket.emit('profile_sync_error', { error: 'userId and profileId are required' });
-      return;
-    }
-
-    const userIdStr = toStr(userId);
-    await UserBackup.verifyAccess(userIdStr, profileId);
-    console.log(`🔽 User ${userIdStr} pulling from profile: ${profileId}`);
-
-    const backup = await UserBackup.findOne(UserBackup.getSharedQuery(profileId));
-    if (!backup) {
-      socket.emit('profile_sync_error', { error: 'No backup found for this profile', profileId });
-      return;
-    }
-
-    let syncData;
-    if (boxNames.length > 0) {
-      syncData = {};
-      for (const boxName of boxNames) {
-        const d = getBoxData(backup.data, boxName);
-        if (d !== undefined) syncData[boxName] = d;
+socket.on('pull_changes', async ({ profileId, userId, boxNames = [], lastSyncTime = null }) => {
+    try {
+      if (!userId || !profileId) {
+        socket.emit('profile_sync_error', { error: 'userId and profileId are required' });
+        return;
       }
-      console.log(`✅ Selective pull (${boxNames.length} boxes) for profile: ${profileId}`);
-    } else {
-      syncData = dataToPlainObject(backup.data);
-      console.log(`✅ Full pull for profile: ${profileId}`);
+
+      const userIdStr = toStr(userId);
+      await UserBackup.verifyAccess(userIdStr, profileId);
+      console.log(`🔽 User ${userIdStr} pulling from profile: ${profileId}`);
+
+      const backup = await UserBackup.findOne(UserBackup.getSharedQuery(profileId));
+      if (!backup) {
+        socket.emit('profile_sync_error', { error: 'No backup found for this profile', profileId });
+        return;
+      }
+
+      let syncData;
+      if (boxNames.length > 0) {
+        syncData = {};
+        for (const boxName of boxNames) {
+          const d = getBoxData(backup.data, boxName);
+          if (d !== undefined) syncData[boxName] = d;
+        }
+        console.log(`✅ Selective pull (${boxNames.length} boxes) for profile: ${profileId}`);
+      } else {
+        syncData = dataToPlainObject(backup.data);
+        console.log(`✅ Full pull for profile: ${profileId}`);
+      }
+
+      socket.emit('pull_success', {
+        profileId,
+        data:           syncData,
+        lastBackupTime: backup.lastBackupTime,
+        lastPushedBy:   backup.lastPushedBy ? toStr(backup.lastPushedBy) : null,
+        version:        backup.version,
+        stats:          backup.stats,
+        dataSize:       backup.getFormattedSize?.() ?? 0,
+        hasConflict:    false,
+        boxNames:       boxNames.length > 0 ? boxNames : Object.keys(syncData),
+      });
+
+      console.log(`✅ Pull done for user ${userIdStr} — profile: ${profileId}`);
+
+      // ── Notify the original pusher only if they are currently offline ─────
+      // If they're online they already see activity in real-time via socket
+      // and a push notification would just be noise.
+      try {
+        const lastPusherIdStr = backup.lastPushedBy ? toStr(backup.lastPushedBy) : null;
+
+        if (lastPusherIdStr && lastPusherIdStr !== userIdStr) {
+          const room           = roomSocketsMap[`profile_${profileId}`];
+          const pusherIsOnline = room?.userIds.has(lastPusherIdStr) ?? false;
+
+          if (!pusherIsOnline) {
+            // Puller name: prefer in-room cache, fall back to a single DB lookup
+            const pullerInfo = room?.userInfo.get(userIdStr);
+            const pullerName = pullerInfo?.userName
+              ?? (await ManerejaUser.findById(userIdStr).select('name').lean())?.name
+              ?? 'A team member';
+
+            const profileName = await _getProfileName(profileId);
+
+            await notifyUser(lastPusherIdStr, {
+              title:    `🔽 ${pullerName} pulled your changes`,
+              body:     `${pullerName} just synced the latest data you pushed to "${profileName}".`,
+              type:     'alert',
+              priority: 'low',
+              persist:  true,
+              metadata: {
+                event:       'data_pulled',
+                profileId:   profileId.toString(),
+                pulledBy:    userIdStr,
+                pullerName,
+                profileName,
+              },
+            }).catch(e => console.warn(`[profileSync] pull notify failed for ${lastPusherIdStr}:`, e.message));
+
+            console.log(`📲 Pull notified offline pusher ${lastPusherIdStr}`);
+          } else {
+            console.log(`📲 Original pusher is online — skipping pull push notification`);
+          }
+        }
+      } catch (notifyErr) {
+        console.warn('[profileSync] pull_changes notify block failed (non-fatal):', notifyErr.message);
+      }
+
+    } catch (error) {
+      console.error('❌ Error pulling changes:', error);
+      socket.emit('profile_sync_error', {
+        error:   'Failed to pull changes',
+        details: error.message,
+      });
     }
-
-    socket.emit('pull_success', {
-      profileId,
-      data:           syncData,
-      lastBackupTime: backup.lastBackupTime,
-      lastPushedBy:   backup.lastPushedBy ? toStr(backup.lastPushedBy) : null,
-      version:        backup.version,
-      stats:          backup.stats,
-      dataSize:       backup.getFormattedSize?.() ?? 0,
-      hasConflict:    false,
-      boxNames:       boxNames.length > 0 ? boxNames : Object.keys(syncData),
-    });
-
-  } catch (error) {
-    console.error('❌ Error pulling changes:', error);
-    socket.emit('profile_sync_error', {
-      error:   'Failed to pull changes',
-      details: error.message,
-    });
-  }
-});
+  })
 
   // ==========================================
   // REQUEST SYNC STATUS
@@ -741,4 +851,18 @@ function _buildMemberList(room) {
       isOnline: true,
     };
   });
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// _getProfileName: lightweight name lookup with a fallback
+// Called at most once per push/pull — result is not cached since profile names
+// change rarely and this avoids stale data without adding complexity.
+// ─────────────────────────────────────────────────────────────────────────────
+async function _getProfileName(profileId) {
+  try {
+    const profile = await BusinessProfile.findById(profileId).select('name').lean();
+    return profile?.name ?? 'your profile';
+  } catch (_) {
+    return 'your profile';
+  }
 }

@@ -10,6 +10,8 @@ const User = require('../../models/manereja/user.js');
  * @param {Object} options - Report options (startDate, endDate, includeTaskDetails)
  * @returns {Object} Detailed project report
  */
+
+
 async function generateProjectProgressReport(projectId, options = {}) {
   const {
     startDate = null,
@@ -61,20 +63,33 @@ async function generateProjectProgressReport(projectId, options = {}) {
   // Task completion trends
   const completionTrends = calculateCompletionTrends(tasks, startDate, endDate);
 
+  // ✅ FIXED: projectInfo with all required fields and proper IDs
   const report = {
     projectInfo: {
+      _id: project._id.toString(),
       id: project._id.toString(),
-      name: project.name,
-      description: project.description,
-      status: project.status,
-      priority: project.priority,
-      createdBy: project.createdBy?.name,
-      projectLead: project.projectLead?.name,
-      startDate: project.startDate,
-      endDate: project.endDate,
-      goalDescription: project.goalDescription,
-      goalTargetValue: project.goalTargetValue,
-      goalUnit: project.goalUnit,
+      name: project.name || '',
+      description: project.description || null,
+      businessProfileId: project.businessProfileId?.toString() || '',
+      createdBy: project.createdBy?._id?.toString() || project.createdBy?.toString() || '',
+      createdByName: project.createdBy?.name || '',
+      projectLead: project.projectLead?._id?.toString() || project.projectLead?.toString() || '',
+      projectLeadName: project.projectLead?.name || '',
+      status: project.status || 'draft',
+      priority: project.priority || 'medium',
+      startDate: project.startDate || null,
+      endDate: project.endDate || null,
+      goalDescription: project.goalDescription || null,
+      goalTargetValue: project.goalTargetValue || null,
+      goalUnit: project.goalUnit || null,
+      totalTasks: project.totalTasks || 0,
+      completedTasks: project.completedTasks || 0,
+      progressPercentage: project.progressPercentage || 0,
+      totalTaskWeight: project.totalTaskWeight || 0,
+      completedTaskWeight: project.completedTaskWeight || 0,
+      memberIds: project.memberIds?.map(id => id.toString()) || [],
+      createdAt: project.createdAt,
+      updatedAt: project.updatedAt,
     },
     
     summary: {
@@ -85,19 +100,19 @@ async function generateProjectProgressReport(projectId, options = {}) {
       blockedTasks: metrics.blockedTasks,
       overdueTasks: metrics.overdueTasks,
       completionRate: metrics.completionRate,
-      progressPercentage: project.progressPercentage,
-      totalTaskWeight: project.totalTaskWeight,
-      completedTaskWeight: project.completedTaskWeight,
-      hasProperWeightAllocation: project.totalTaskWeight >= 99 && project.totalTaskWeight <= 100,
+      progressPercentage: project.progressPercentage || 0,
+      totalTaskWeight: project.totalTaskWeight || 0,
+      completedTaskWeight: project.completedTaskWeight || 0,
+      hasProperWeightAllocation: (project.totalTaskWeight || 0) >= 99 && (project.totalTaskWeight || 0) <= 100,
     },
 
     goalProgress: project.goalTargetValue ? {
       description: project.goalDescription,
       targetValue: project.goalTargetValue,
-      currentValue: (project.goalTargetValue * project.progressPercentage) / 100,
-      remainingValue: project.goalTargetValue - ((project.goalTargetValue * project.progressPercentage) / 100),
+      currentValue: (project.goalTargetValue * (project.progressPercentage || 0)) / 100,
+      remainingValue: project.goalTargetValue - ((project.goalTargetValue * (project.progressPercentage || 0)) / 100),
       unit: project.goalUnit,
-      progressPercentage: project.progressPercentage,
+      progressPercentage: project.progressPercentage || 0,
     } : null,
 
     tasksByStatus,
@@ -123,11 +138,12 @@ async function generateProjectProgressReport(projectId, options = {}) {
       title: task.title,
       status: task.status,
       priority: task.priority,
-      assignedTo: task.assignedTo?.name,
+      assignedTo: task.assignedTo?._id?.toString() || task.assignedTo?.toString(),
+      assignedToName: task.assignedTo?.name,
       assignedToEmail: task.assignedTo?.email,
-      weightPercentage: task.weightPercentage,
-      progressPercentage: task.progressPercentage,
-      actualContribution: (task.weightPercentage * task.progressPercentage) / 100,
+      weightPercentage: task.weightPercentage || 0,
+      progressPercentage: task.progressPercentage || 0,
+      actualContribution: ((task.weightPercentage || 0) * (task.progressPercentage || 0)) / 100,
       dueDate: task.dueDate,
       completedAt: task.completedAt,
       isOverdue: task.dueDate && new Date() > task.dueDate && task.status !== 'completed',
@@ -135,7 +151,7 @@ async function generateProjectProgressReport(projectId, options = {}) {
       actualTimeSpent: task.actualTimeSpent,
       isWithinAllocatedTime: task.isWithinAllocatedTime,
       timeOverrun: task.timeOverrun,
-      commentCount: task.commentCount,
+      commentCount: task.commentCount || 0,
       createdAt: task.createdAt,
       updatedAt: task.updatedAt,
     }));
@@ -149,7 +165,6 @@ async function generateProjectProgressReport(projectId, options = {}) {
 
   return report;
 }
-
 /**
  * Generate employee performance report across all projects
  * @param {String} employeeId - Employee user ID
@@ -446,13 +461,13 @@ function calculateProjectMetrics(project, tasks) {
   ).length;
 
   return {
-    totalTasks,
-    completedTasks,
-    inProgressTasks,
-    todoTasks,
-    blockedTasks,
-    overdueTasks,
-    completionRate: totalTasks > 0 ? ((completedTasks / totalTasks) * 100).toFixed(2) : 0,
+    totalTasks: totalTasks || 0,
+    completedTasks: completedTasks || 0,
+    inProgressTasks: inProgressTasks || 0,
+    todoTasks: todoTasks || 0,
+    blockedTasks: blockedTasks || 0,
+    overdueTasks: overdueTasks || 0,
+    completionRate: totalTasks > 0 ? ((completedTasks / totalTasks) * 100).toFixed(2) : '0',
   };
 }
 

@@ -175,7 +175,8 @@ const reviewValidation = [
 // Public routes (no authentication required)
 router.post('/signup', signUpValidation, userController.signUp);
 router.post('/signin', signInValidation, userController.signIn);
-router.post('/google-auth', googleAuthValidation, userController.googleAuth);
+router.post('/google/signin', userController.googleSignIn);
+router.post('/google/signup', userController.googleSignUp);
 router.post('/reset-password', resetPasswordValidation, userController.resetPassword);
 router.post('/verify-token', userController.verifyToken);
 router.get('/auto-login', userController.autoLogin);

@@ -10,6 +10,7 @@ const taskerReportSubmissionEvents = require('./events/taskerSubmissionEvents.js
 const profileSyncEvents = require('./events/profileSyncEvents.js');
 const packageNotificationService = require('./events/packageNotificationService.js');
 const rowFlagEvents = require('./events/rowFlagEvents');
+const registerChecklistHandlers = require('./events/taskChecklistHandler');
 
 const User = require('../models/manereja/user.js');
 
@@ -148,6 +149,7 @@ function initSocket(server) {
     NotificationsEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
     //CashflowEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
     rowFlagEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
+    registerChecklistHandlers(socket, io, userSockets);
     // Note: packageNotificationService is a service, not a socket event module.
     // Call it only if it expects to be invoked per-connection.
     // packageNotificationService(io, socket, userSockets, roomSocketsMap, socketToUser);

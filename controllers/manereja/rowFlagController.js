@@ -465,6 +465,7 @@ exports.deleteRowFlag = async (req, res) => {
     flagType:      rowFlag.flagType,
     rowFlagId:     rowFlag._id.toString(),
     contextHeader: rowFlag.contextHeader,
+   // projectId:     rowFlag.projectId.toString(),
   },
 });
  

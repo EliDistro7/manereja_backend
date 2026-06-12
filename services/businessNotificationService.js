@@ -1,9 +1,8 @@
-// backend/services/businessNotificationService.js
-
-const SystemNotification = require('../models/manereja/SystemNotification');
-const BusinessProfile    = require('../models/manereja/business-profile');
-const User               = require('../models/manereja/user');
-const { sendPushNotification } = require('./pushNotificationService');
+const SystemNotification  = require('../models/manereja/SystemNotification');
+const BusinessProfile     = require('../models/manereja/business-profile');
+const User                = require('../models/manereja/user');
+const { sendPushNotificationWithFallback } = require('./pushNotificationService');
+const PendingNotification = require('../models/manereja/PendingNotifications');
 
 async function notifyProfileAdmins(businessProfileId, {
   title,
@@ -12,7 +11,7 @@ async function notifyProfileAdmins(businessProfileId, {
   priority = 'normal',
   metadata = null,
   persist  = true,
-  actions  = [], 
+  actions  = [],
 }) {
   console.log(`[businessNotif] ▶️  notifyProfileAdmins called — profileId: ${businessProfileId}, title: "${title}"`);
 
@@ -26,8 +25,6 @@ async function notifyProfileAdmins(businessProfileId, {
       return;
     }
 
-    console.log(`[businessNotif] 👤 ownerId: ${profile.ownerId}`);
-
     const recipients = new Set();
     recipients.add(profile.ownerId.toString());
 
@@ -36,153 +33,175 @@ async function notifyProfileAdmins(businessProfileId, {
       : (profile.members || {});
 
     for (const [uid, member] of Object.entries(members)) {
-      if (member.role === 'admin') {
-        recipients.add(uid);
-        console.log(`[businessNotif] 🛡️  Admin added: ${uid}`);
-      }
+      if (member.role === 'admin') recipients.add(uid);
     }
 
     const recipientIds = [...recipients];
     console.log(`[businessNotif] 📋 recipientIds (${recipientIds.length}):`, recipientIds);
 
     // ── 2. Persist to DB ──────────────────────────────────────────────────
+    // businessProfileId is stored so the Flutter client can filter
+    // notifications by active profile.
     let notif = null;
     if (persist) {
       notif = await SystemNotification.create({
-        title, body, type, priority,
+        title,
+        body,
+        type,
+        priority,
+        businessProfileId,          // ← profile-scoped
         targetUserIds: recipientIds,
         actions,
-        metadata, isActive: true, expiresAt: null,
+        metadata,
+        isActive:  true,
+        expiresAt: null,
       });
-      console.log(`[businessNotif] 💾 Notification persisted — _id: ${notif._id}`);
-    } else {
-      console.log(`[businessNotif] ⏭️  persist=false — skipping DB save`);
+      console.log(`[businessNotif] 💾 Notification persisted — _id: ${notif._id}, profileId: ${businessProfileId}`);
     }
 
     // ── 3. Socket push ────────────────────────────────────────────────────
     const payload = notif
-      ? { ...notif.toObject(), id: notif._id.toString(), status: 'unread' }
-      : { id: `live_${Date.now()}`, title, body, type, priority, metadata,
-          status: 'unread', createdAt: new Date().toISOString() };
-
-    try {
-      const { getIo, userSockets } = require('../socket/base');
-      console.log(`[businessNotif] 🔌 getIo type: ${typeof getIo}`);
-
-      const io = getIo();
-      let socketsSent = 0;
-
-      for (const uid of recipientIds) {
-        const sockets = userSockets[uid];
-        console.log(`[businessNotif] 🔍 uid: ${uid} — online sockets:`, sockets ? [...sockets] : 'NONE (offline)');
-        if (sockets) {
-          for (const sid of sockets) {
-            io.to(sid).emit('system_notification', payload);
-            socketsSent++;
-          }
+      ? {
+          ...notif.toObject(),
+          id:                notif._id.toString(),
+          businessProfileId: businessProfileId.toString(),
+          status:            'unread',
         }
-      }
-
-      console.log(`[businessNotif] 📡 Socket emit done — sent to ${socketsSent} socket(s)`);
-    } catch (socketErr) {
-      console.warn('[businessNotif] ⚠️  Socket push skipped:', socketErr.message);
-    }
-
-    // ── 4. FCM push ───────────────────────────────────────────────────────
-    try {
-      const users = await User.find({
-        _id:      { $in: recipientIds },
-        fcmToken: { $ne: null },
-      }).select('_id fcmToken');
-
-      console.log(`[businessNotif] 📲 Users with FCM tokens (${users.length}):`,
-        users.map(u => ({ id: u._id, token: u.fcmToken?.slice(0, 20) + '...' }))
-      );
-
-      if (users.length === 0) {
-        console.warn('[businessNotif] ⚠️  No FCM tokens found — check that mobile clients are saving their token after login');
-      }
-
-      await Promise.allSettled(users.map(u =>
-        sendPushNotification({
-          fcmToken: u.fcmToken,
+      : {
+          id:                `live_${Date.now()}`,
           title,
           body,
-          data: {
-            type,
-            notificationId: notif?._id.toString() ?? '',
-            ...(metadata ? { metadata: JSON.stringify(metadata) } : {}),
-          },
-        })
-      ));
+          type,
+          priority,
+          businessProfileId: businessProfileId.toString(),
+          metadata,
+          status:            'unread',
+          createdAt:         new Date().toISOString(),
+        };
 
-      console.log(`[businessNotif] ✅ FCM push attempted for ${users.length} device(s)`);
-    } catch (pushErr) {
-      console.warn('[businessNotif] ⚠️  FCM push failed (non-fatal):', pushErr.message);
+    const { getIo, userSockets } = require('../socket/base');
+    const io = getIo();
+    let socketsSent = 0;
+    const onlineRecipients = new Set();
+
+    for (const uid of recipientIds) {
+      const sockets = userSockets[uid];
+      if (sockets && sockets.size > 0) {
+        for (const sid of sockets) io.to(sid).emit('system_notification', payload);
+        socketsSent++;
+        onlineRecipients.add(uid);
+      }
     }
+    console.log(`[businessNotif] 📡 Socket emit done — sent to ${socketsSent} socket(s)`);
+
+    // ── 4. FCM + queue for offline recipients ─────────────────────────────
+    const offlineRecipients = recipientIds.filter(uid => !onlineRecipients.has(uid));
+    console.log(`[businessNotif] 📲 Offline recipients: ${offlineRecipients.length}`);
+
+    await Promise.allSettled(offlineRecipients.map(uid =>
+      sendPushNotificationWithFallback({
+        userId:              uid,
+        title,
+        body,
+        data: {
+          type,
+          businessProfileId: businessProfileId.toString(),
+          notificationId:    notif?._id.toString() ?? '',
+          ...(metadata ? { metadata: JSON.stringify(metadata) } : {}),
+        },
+        systemNotificationId: notif?._id ?? null,
+      })
+    ));
 
     console.log(`[businessNotif] ✅ Done — "${title}" → ${recipientIds.length} recipient(s)`);
-
   } catch (err) {
     console.error('[businessNotif] 💥 notifyProfileAdmins uncaught error:', err);
   }
 }
 
 // ─── notifyUser ───────────────────────────────────────────────────────────────
+// businessProfileId is optional — pass it when the notification is
+// scoped to a specific profile (e.g. report approved for profile X).
+// Omit it (or pass null) for global user-level notifications.
+
 async function notifyUser(userId, {
-  title, body, type = 'info', priority = 'normal', metadata = {},
-  actions  = [],     // ← add
-  persist  = true,  
+  title,
+  body,
+  type              = 'info',
+  priority          = 'normal',
+  metadata          = {},
+  actions           = [],
+  persist           = true,
+  businessProfileId = null,   // ← new optional param
 }) {
   try {
-    // ── 1. Persist to DB (optional) ───────────────────────────────────────
+    // ── 1. Persist to DB ──────────────────────────────────────────────────
     let notif = null;
     if (persist) {
       notif = await SystemNotification.create({
-        title, body, type, priority,
+        title,
+        body,
+        type,
+        priority,
+        businessProfileId: businessProfileId ?? null,   // ← stored when provided
         targetUserIds: [userId.toString()],
         actions,
-        metadata, isActive: true, expiresAt: null,
+        metadata,
+        isActive:  true,
+        expiresAt: null,
       });
     }
 
-    // ── 2. Socket push ────────────────────────────────────────────────────
-    try {
-      const { getIo, userSockets } = require('../socket/base');
-      const io = getIo();
-      const sockets = userSockets[userId.toString()];
-      if (sockets) {
-        const payload = notif
-          ? { ...notif.toObject(), id: notif._id.toString(), status: 'unread' }
-          : { id: `live_${Date.now()}`, title, body, type, priority,
-              actions, metadata, status: 'unread',
-              createdAt: new Date().toISOString() };
-        for (const sid of sockets) {
-          io.to(sid).emit('system_notification', payload);
+    const payload = notif
+      ? {
+          ...notif.toObject(),
+          id:                notif._id.toString(),
+          businessProfileId: businessProfileId?.toString() ?? null,
+          status:            'unread',
         }
-      }
-    } catch (socketErr) {
-      console.warn('[businessNotif] ⚠️  notifyUser socket push skipped:', socketErr.message);
+      : {
+          id:                `live_${Date.now()}`,
+          title,
+          body,
+          type,
+          priority,
+          businessProfileId: businessProfileId?.toString() ?? null,
+          actions,
+          metadata,
+          status:            'unread',
+          createdAt:         new Date().toISOString(),
+        };
+
+    // ── 2. Socket (online path) ───────────────────────────────────────────
+    const { getIo, userSockets } = require('../socket/base');
+    const io      = getIo();
+    const sockets = userSockets[userId.toString()];
+    const isOnline = sockets && sockets.size > 0;
+
+    if (isOnline) {
+      for (const sid of sockets) io.to(sid).emit('system_notification', payload);
+      console.log(`[businessNotif] 📡 Socket sent to ${sockets.size} socket(s) for user ${userId}`);
     }
 
-    // ── 3. FCM push ───────────────────────────────────────────────────────
-    const user = await User.findById(userId).select('fcmToken').lean();
-    if (!user?.fcmToken) {
-      console.warn(`[businessNotif] ⚠️  notifyUser — no FCM token for ${userId}`);
-      return;
+    // ── 3. FCM + queue only if offline ────────────────────────────────────
+    if (!isOnline) {
+      await sendPushNotificationWithFallback({
+        userId,
+        title,
+        body,
+        data: {
+          type,
+          priority,
+          ...(businessProfileId ? { businessProfileId: businessProfileId.toString() } : {}),
+          ...Object.fromEntries(
+            Object.entries(metadata).map(([k, v]) => [k, String(v)])
+          ),
+        },
+        systemNotificationId: notif?._id ?? null,
+      });
     }
 
-    const stringifiedMeta = Object.fromEntries(
-      Object.entries(metadata).map(([k, v]) => [k, String(v)])
-    );
-
-    await sendPushNotification({
-      fcmToken: user.fcmToken,
-      title, body,
-      data: { type, priority, ...stringifiedMeta },
-    });
-
-    console.log(`[businessNotif] ✅ notifyUser done — userId: ${userId}`);
+    console.log(`[businessNotif] ✅ notifyUser done — userId: ${userId}, online: ${isOnline}, profileId: ${businessProfileId ?? 'global'}`);
   } catch (error) {
     console.error(`[businessNotif] 💥 notifyUser failed for ${userId}:`, error);
   }
