@@ -1,4 +1,4 @@
-
+const crypto = require('crypto');
 const ReportTemplate    = require('../../models/manereja/report-template.js');
 const ReportSubmission  = require('../../models/manereja/report-submission.js');
 const Task              = require('../../models/manereja/task.js');
@@ -21,6 +21,22 @@ function notDeleted() {
   return { $or: [{ isDeleted: false }, { isDeleted: { $exists: false } }] };
 }
 // ────────────────────────────────────────────────────────────────────────────
+
+function excludeManualEntries() {
+  return { isManualEntry: { $ne: true } };
+}
+
+
+async function resolveTaskContext(taskId) {
+  const task = await Task.findById(taskId);
+  if (!task) return null;
+  const project = await Project.findById(task.projectId);
+  if (!project) return null;
+  const profile = await BusinessProfile.findById(project.businessProfileId);
+  if (!profile) return null;
+  const businessProfileId = task.businessProfileId?.toString() || project.businessProfileId.toString();
+  return { task, project, profile, businessProfileId };
+}
 
 module.exports = function taskerReportSubmissionEvents(io, socket, userSockets, roomSocketsMap, socketToUser) {
 
@@ -437,6 +453,7 @@ socket.on('connection_ready', async ({ userId, businessProfileId }) => {
       const staffSubmissions = await ReportSubmission.find({
         ...profileFilter,
         ...notDeleted(),
+        ...excludeManualEntries(),
       })
         .populate('submittedBy', 'name email profilePicture')
         .populate('reviewedBy', 'name email')
@@ -449,6 +466,7 @@ socket.on('connection_ready', async ({ userId, businessProfileId }) => {
         submittedBy: userId,
         ...(businessProfileId ? { businessProfileId } : {}),
         ...notDeleted(),
+        ...excludeManualEntries(),
       })
         .populate('submittedBy', 'name email profilePicture')
         .populate('reviewedBy', 'name email')
@@ -485,6 +503,7 @@ socket.on('connection_ready', async ({ userId, businessProfileId }) => {
         submittedBy: userId,
         ...(businessProfileId ? { businessProfileId } : {}),
         ...notDeleted(),
+        ...excludeManualEntries(),
       })
         .populate('submittedBy', 'name email profilePicture')
         .populate('reviewedBy', 'name email')
@@ -963,7 +982,7 @@ socket.on('get_report_submissions', async ({
   log(`get_report_submissions → userId: ${userId}, taskId: ${taskId ?? '-'}, projectId: ${projectId ?? '-'}, templateId: ${templateId ?? '-'}, employeeId: ${employeeId ?? '-'}, status: ${status ?? 'any'}, businessProfileId: ${businessProfileId ?? '-'}`);
 
   try {
-    const query = { ...notDeleted() };
+    const query = { ...notDeleted(), ...excludeManualEntries() };
 
     if (taskId)     query.taskId     = taskId;
     if (projectId)  query.projectId  = projectId;
@@ -1153,6 +1172,7 @@ socket.on('get_report_compliance', async ({ taskId, templateId, startDate, endDa
       taskId,
       templateId,
       ...notDeleted(),
+      ...excludeManualEntries(),
     })
       .populate('submittedBy', 'name email profilePicture')
       .sort({ submissionDate: 1, createdAt: 1 });
@@ -1444,102 +1464,272 @@ socket.on('get_report_compliance', async ({ taskId, templateId, startDate, endDa
   // ==========================================
   // GET CONSOLIDATED REPORT
   // ==========================================
-  socket.on('get_consolidated_report', async ({
-    taskId, templateId, startDate, endDate, userId,
-  }) => {
-    log(`get_consolidated_report → userId: ${userId}, taskId: ${taskId}, templateId: ${templateId}, range: ${startDate ?? '*'} → ${endDate ?? '*'}`);
-    try {
-      const query = { ...notDeleted(), status: 'approved', taskId, templateId };
+ socket.on('get_consolidated_report', async ({
+  taskId, templateId, startDate, endDate, userId,
+}) => {
+  log(`get_consolidated_report → userId: ${userId}, taskId: ${taskId}, templateId: ${templateId}, range: ${startDate ?? '*'} → ${endDate ?? '*'}`);
+  try {
+    const template = await ReportTemplate.findById(templateId);
+    if (!template) {
+      warn(`get_consolidated_report → template ${templateId} not found`);
+      socket.emit('tasker_error', { error: 'Template not found' });
+      return;
+    }
 
-      if (startDate || endDate) {
-        query.submissionDate = {};
-        if (startDate) query.submissionDate.$gte = new Date(startDate);
-        if (endDate)   query.submissionDate.$lte = new Date(endDate);
-      }
+    const query = { ...notDeleted(), status: 'approved', taskId, templateId };
 
-      const submissions = await ReportSubmission.find(query)
-        .populate('submittedBy', 'name email profilePicture')
-        .populate('reviewedBy', 'name email')
-        .sort({ submissionDate: 1, createdAt: 1 });
+    if (startDate || endDate) {
+      query.submissionDate = {};
+      if (startDate) query.submissionDate.$gte = new Date(startDate);
+      if (endDate)   query.submissionDate.$lte = new Date(endDate);
+    }
 
-      log(`get_consolidated_report → found ${submissions.length} approved submission(s)`);
+    const submissions = await ReportSubmission.find(query)
+      .populate('submittedBy', 'name email profilePicture')
+      .populate('reviewedBy', 'name email')
+      .sort({ submissionDate: 1, createdAt: 1 });
 
-      if (submissions.length === 0) {
-        socket.emit('consolidated_report', {
-          success: true, taskId, templateId,
-          consolidatedRows: [],
-          metadata: {
-            totalSubmissions: 0, totalRows: 0,
-            dateRange: { start: startDate, end: endDate },
-            contributors: [],
-          },
-        });
-        return;
-      }
+    log(`get_consolidated_report → found ${submissions.length} approved submission(s)`);
 
-      const template = await ReportTemplate.findById(templateId);
-      if (!template) {
-        warn(`get_consolidated_report → template ${templateId} not found`);
-        socket.emit('tasker_error', { error: 'Template not found' });
-        return;
-      }
-
-      const consolidatedRows = [];
-      const contributors     = new Set();
-      let totalRows          = 0;
-
-      submissions.forEach(submission => {
-        contributors.add(submission.submittedBy._id.toString());
-        submission.rows.forEach(row => {
-          consolidatedRows.push({
-            rowId: row.rowId,
-            data:  row.data,
-            metadata: {
-              submissionId: submission._id.toString(),
-              submittedBy: {
-                id:             submission.submittedBy._id.toString(),
-                name:           submission.submittedBy.name,
-                email:          submission.submittedBy.email,
-                profilePicture: submission.submittedBy.profilePicture,
-              },
-              submissionDate: submission.submissionDate,
-              reviewedBy:     submission.reviewedBy,
-              reviewedAt:     submission.reviewedAt,
-            },
-          });
-          totalRows++;
-        });
-      });
-
-      consolidatedRows.sort((a, b) => {
-        const dateCompare = new Date(a.metadata.submissionDate) - new Date(b.metadata.submissionDate);
-        if (dateCompare !== 0) return dateCompare;
-        return a.rowId.localeCompare(b.rowId);
-      });
-
-      ok(`get_consolidated_report → built ${consolidatedRows.length} rows from ${submissions.length} submission(s), ${contributors.size} contributor(s)`);
-
+    if (submissions.length === 0) {
       socket.emit('consolidated_report', {
         success: true, taskId, templateId,
         template: formatReportTemplate(template),
-        consolidatedRows,
+        consolidatedRows: [],
         metadata: {
-          totalSubmissions: submissions.length,
-          totalRows,
-          dateRange: {
-            start: startDate || submissions[0].submissionDate,
-            end:   endDate   || submissions[submissions.length - 1].submissionDate,
-          },
-          contributors:    Array.from(contributors),
-          firstSubmission: submissions[0].submissionDate,
-          lastSubmission:  submissions[submissions.length - 1].submissionDate,
+          totalSubmissions: 0, totalRows: 0,
+          dateRange: { start: startDate, end: endDate },
+          contributors: [],
+          firstSubmission: null,
+          lastSubmission: null,
         },
       });
-    } catch (error) {
-      err('get_consolidated_report failed:', error);
-      socket.emit('tasker_error', { error: 'Failed to generate consolidated report', details: error.message });
+      return;
     }
-  });
+
+    const consolidatedRows = [];
+    const contributors     = new Set();
+    let totalRows          = 0;
+
+    submissions.forEach(submission => {
+      contributors.add(submission.submittedBy._id.toString());
+      submission.rows.forEach(row => {
+        consolidatedRows.push({
+          rowId: row.rowId,
+          data:  row.data,
+          metadata: {
+            submissionId: submission._id.toString(),
+            submittedBy: {
+              id:             submission.submittedBy._id.toString(),
+              name:           submission.submittedBy.name,
+              email:          submission.submittedBy.email,
+              profilePicture: submission.submittedBy.profilePicture,
+            },
+            submissionDate: submission.submissionDate,
+            reviewedBy:     submission.reviewedBy,
+            reviewedAt:     submission.reviewedAt,
+            isManualEntry:  submission.isManualEntry === true,
+          },
+        });
+        totalRows++;
+      });
+    });
+
+    consolidatedRows.sort((a, b) => {
+      const dateCompare = new Date(a.metadata.submissionDate) - new Date(b.metadata.submissionDate);
+      if (dateCompare !== 0) return dateCompare;
+      return a.rowId.localeCompare(b.rowId);
+    });
+
+    ok(`get_consolidated_report → built ${consolidatedRows.length} rows from ${submissions.length} submission(s), ${contributors.size} contributor(s)`);
+
+    socket.emit('consolidated_report', {
+      success: true, taskId, templateId,
+      template: formatReportTemplate(template),
+      consolidatedRows,
+      metadata: {
+        totalSubmissions: submissions.length,
+        totalRows,
+        dateRange: {
+          start: startDate || submissions[0].submissionDate,
+          end:   endDate   || submissions[submissions.length - 1].submissionDate,
+        },
+        contributors:    Array.from(contributors),
+        firstSubmission: submissions[0].submissionDate,
+        lastSubmission:  submissions[submissions.length - 1].submissionDate,
+      },
+    });
+  } catch (error) {
+    err('get_consolidated_report failed:', error);
+    socket.emit('tasker_error', { error: 'Failed to generate consolidated report', details: error.message });
+  }
+});
+
+
+// ==========================================
+// ADD CONSOLIDATED REPORT ROW (manual entry)
+// ==========================================
+socket.on('add_consolidated_report_row', async ({ taskId, templateId, rowData, userId }) => {
+  log(`add_consolidated_report_row → userId: ${userId}, taskId: ${taskId}, templateId: ${templateId}`);
+  try {
+    const ctx = await resolveTaskContext(taskId);
+    if (!ctx) {
+      socket.emit('tasker_error', { error: 'Task, project, or business profile not found' });
+      return;
+    }
+    if (!(await isOwnerOrAdmin(ctx.profile, userId))) {
+      warn(`add_consolidated_report_row → access denied for userId ${userId}`);
+      socket.emit('tasker_error', { error: 'Only owner or admin can add report rows' });
+      return;
+    }
+
+    const template = await ReportTemplate.findById(templateId);
+    if (!template) {
+      socket.emit('tasker_error', { error: 'Report template not found' });
+      return;
+    }
+
+    const rowId = `manual_${crypto.randomUUID()}`;
+    const now = new Date();
+
+    const submission = new ReportSubmission({
+      templateId,
+      taskId,
+      projectId:         ctx.task.projectId,
+      businessProfileId: ctx.businessProfileId,
+      submittedBy:       userId,
+      rows:              [{ rowId, data: rowData || {} }],
+      submissionDate:    now,
+      status:            'approved',
+      submittedAt:       now,
+      reviewedBy:        userId,
+      reviewedAt:        now,
+      isManualEntry:     true,
+    });
+
+    await submission.save();
+    await submission.populate('submittedBy', 'name email profilePicture');
+    await submission.populate('reviewedBy', 'name email');
+
+    ok(`add_consolidated_report_row → ✅ created manual submission ${submission._id} with row ${rowId}`);
+
+    socket.emit('consolidated_report_row_added', {
+      success: true,
+      taskId,
+      templateId,
+      row: {
+        rowId,
+        data: rowData || {},
+        metadata: {
+          submissionId: submission._id.toString(),
+          submittedBy: {
+            id:             submission.submittedBy._id.toString(),
+            name:           submission.submittedBy.name,
+            email:          submission.submittedBy.email,
+            profilePicture: submission.submittedBy.profilePicture,
+          },
+          submissionDate: submission.submissionDate,
+          reviewedBy:     submission.reviewedBy?._id?.toString() || null,
+          reviewedAt:     submission.reviewedAt,
+          isManualEntry:  true,
+        },
+      },
+    });
+  } catch (error) {
+    err('add_consolidated_report_row failed:', error);
+    socket.emit('tasker_error', { error: 'Failed to add report row', details: error.message });
+  }
+});
+
+// ==========================================
+// UPDATE CONSOLIDATED REPORT ROW (manual entry)
+// ==========================================
+socket.on('update_consolidated_report_row', async ({ submissionId, rowId, rowData, userId }) => {
+  log(`update_consolidated_report_row → userId: ${userId}, submissionId: ${submissionId}, rowId: ${rowId}`);
+  try {
+    const submission = await ReportSubmission.findById(submissionId);
+    if (!submission || submission.isDeleted) {
+      socket.emit('tasker_error', { error: 'Row not found' });
+      return;
+    }
+    if (!submission.isManualEntry) {
+      warn(`update_consolidated_report_row → submission ${submissionId} is not a manual entry — refusing edit`);
+      socket.emit('tasker_error', { error: 'Only manually added rows can be edited' });
+      return;
+    }
+
+    const profile = await BusinessProfile.findById(submission.businessProfileId);
+    if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+      socket.emit('tasker_error', { error: 'Only owner or admin can edit report rows' });
+      return;
+    }
+
+    const row = submission.rows.find(r => r.rowId === rowId);
+    if (!row) {
+      socket.emit('tasker_error', { error: 'Row not found in submission' });
+      return;
+    }
+    row.data = rowData || {};
+    submission.markModified('rows');
+    submission.updatedAt = new Date();
+    await submission.save();
+
+    ok(`update_consolidated_report_row → ✅ updated row ${rowId} on submission ${submissionId}`);
+
+    socket.emit('consolidated_report_row_updated', {
+      success: true,
+      taskId:      submission.taskId.toString(),
+      templateId:  submission.templateId.toString(),
+      submissionId,
+      rowId,
+      data: row.data,
+    });
+  } catch (error) {
+    err('update_consolidated_report_row failed:', error);
+    socket.emit('tasker_error', { error: 'Failed to update report row', details: error.message });
+  }
+});
+
+// ==========================================
+// DELETE CONSOLIDATED REPORT ROW (manual entry)
+// ==========================================
+socket.on('delete_consolidated_report_row', async ({ submissionId, userId }) => {
+  log(`delete_consolidated_report_row → userId: ${userId}, submissionId: ${submissionId}`);
+  try {
+    const submission = await ReportSubmission.findById(submissionId);
+    if (!submission || submission.isDeleted) {
+      socket.emit('tasker_error', { error: 'Row not found' });
+      return;
+    }
+    if (!submission.isManualEntry) {
+      warn(`delete_consolidated_report_row → submission ${submissionId} is not a manual entry — refusing delete`);
+      socket.emit('tasker_error', { error: 'Only manually added rows can be deleted' });
+      return;
+    }
+
+    const profile = await BusinessProfile.findById(submission.businessProfileId);
+    if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+      socket.emit('tasker_error', { error: 'Only owner or admin can delete report rows' });
+      return;
+    }
+
+    submission.isDeleted = true;
+    submission.updatedAt = new Date();
+    await submission.save();
+
+    ok(`delete_consolidated_report_row → ✅ soft-deleted manual submission ${submissionId}`);
+
+    socket.emit('consolidated_report_row_deleted', {
+      success: true,
+      taskId:     submission.taskId.toString(),
+      templateId: submission.templateId.toString(),
+      submissionId,
+    });
+  } catch (error) {
+    err('delete_consolidated_report_row failed:', error);
+    socket.emit('tasker_error', { error: 'Failed to delete report row', details: error.message });
+  }
+});
 
   // ==========================================
   // GET CONSOLIDATED REPORTS BY PROJECT
@@ -1625,7 +1815,7 @@ socket.on('get_report_compliance', async ({ taskId, templateId, startDate, endDa
   }) => {
     log(`export_report_submissions → userId: ${userId}, templateId: ${templateId ?? '-'}, projectId: ${projectId ?? '-'}, employeeId: ${employeeId ?? '-'}`);
     try {
-      const query = { ...notDeleted(), status: 'approved' };
+      const query = { ...notDeleted(), status: 'approved', ...excludeManualEntries() };
       if (templateId) query.templateId = templateId;
       if (projectId)  query.projectId  = projectId;
       if (employeeId) query.submittedBy = employeeId;

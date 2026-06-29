@@ -19,7 +19,8 @@ async function seedAdmin() {
     console.log(`✅ Super admin seeded: ${admin.email}`);
   } catch (err) {
     console.error("❌ Admin seed failed:", err.message);
+
   }
-}
+};
 
 module.exports = seedAdmin;

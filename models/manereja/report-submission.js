@@ -26,6 +26,7 @@ const reportSubmissionSchema = new mongoose.Schema({
     required: true,
     index: true,
   },
+  isManualEntry: { type: Boolean, default: false },
   projectId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Project',
