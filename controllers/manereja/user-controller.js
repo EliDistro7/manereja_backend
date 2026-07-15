@@ -58,12 +58,16 @@ class UserController {
   }
 
   // ── helper (private) ──────────────────────────────────────────────────
+// AFTER
 async _verifyGoogleToken(idToken) {
   const ticket = await googleClient.verifyIdToken({
     idToken,
-    audience: process.env.GOOGLE_CLIENT_ID,
+    audience: [
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_ID_ANDROID,
+    ].filter(Boolean),
   });
-  return ticket.getPayload(); // { sub, email, name, picture, email_verified }
+  return ticket.getPayload();
 }
 
 
@@ -348,10 +352,20 @@ googleSignIn = async (req, res) => {
 
     const { sub: googleId, email, name, picture, email_verified } = payload;
 
-    let user = await User.findOne({ $or: [{ googleId }, { email: email.toLowerCase() }] });
-    if (!user) {
-      return this.errorResponse(res, 'No account found. Please sign up first.', 404);
-    }
+   // AFTER — creates account on first Google login
+let user = await User.findOne({ $or: [{ googleId }, { email: email.toLowerCase() }] });
+if (!user) {
+  user = new User({
+    email: email.toLowerCase(),
+    name,
+    googleId,
+    authType: 'google',
+    profilePicture: picture,
+    isEmailVerified: email_verified ?? true,
+  });
+  await user.save();
+  await this.initializeUserSettingsAndServices(user._id, user.subscriptionType);
+}
 
     // Merge Google identity onto an existing local account
     if (!user.googleId) {
