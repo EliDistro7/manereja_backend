@@ -118,6 +118,58 @@ taskplaceLocation: {
     type: Number, // in hours (how much over allocated time)
     min: 0,
   },
+
+ // REMOVE these single-person fields from the schema:
+// checkedInBy, workLocation, isAtTaskplace, distanceFromTaskplace,
+// actualStartTime, actualEndTime, actualTimeSpent,
+// isWithinAllocatedTime, timeOverrun
+
+// ADD instead:
+activeSessions: [{
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'ManerejaUser',
+    required: true,
+  },
+  startTime: {
+    type: Date,
+    required: true,
+  },
+  workLocation: {
+    coordinates: {
+      latitude: Number,
+      longitude: Number,
+      accuracy: Number,
+    },
+    displayName: String,
+    country: String,
+    city: String,
+  },
+  isAtTaskplace: Boolean,
+  distanceFromTaskplace: Number,
+}],
+
+completedSessions: [{
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'ManerejaUser',
+  },
+  startTime: Date,
+  endTime: Date,
+  timeSpentHours: Number,
+  isWithinAllocatedTime: Boolean,
+  timeOverrun: Number,
+  workLocation: {
+    coordinates: {
+      latitude: Number,
+      longitude: Number,
+      accuracy: Number,
+    },
+    displayName: String,
+    country: String,
+    city: String,
+  },
+}],
   
   // Location Tracking — embedded snapshot (mirrors attendance check-in/out location style)
   workLocation: {
@@ -301,67 +353,118 @@ taskSchema.virtual('isOverAllocatedTime').get(function() {
   return this.actualTimeSpent > this.allocatedTimeHours;
 });
 
+
+taskSchema.virtual('activeWorkerIds').get(function() {
+  return (this.activeSessions || []).map(s => s.userId.toString());
+});
+
+taskSchema.virtual('isRunning').get(function() {
+  return (this.activeSessions || []).length > 0;
+});
+
 // Methods
 
 /**
  * Start task execution — accepts embedded location data directly (no DB lookup needed)
  * @param {Object} locationData - { coordinates: { latitude, longitude, accuracy }, displayName, country, city }
  */
-taskSchema.methods.startTaskExecution = async function(locationData) {
-  this.actualStartTime = new Date();
-  
+// START — one session per user, no overwrite
+taskSchema.methods.startTaskExecution = async function(locationData, userId) {
+  // Prevent duplicate session for same user
+  const alreadyRunning = (this.activeSessions || [])
+    .some(s => s.userId.toString() === userId.toString());
+  if (alreadyRunning) throw new Error('User already has an active session');
+
+  const session = {
+    userId,
+    startTime: new Date(),
+  };
+
   if (locationData) {
-    // Store location as an embedded snapshot, just like attendance check-in
-    this.workLocation = {
+    session.workLocation = {
       coordinates: {
-        latitude: locationData.coordinates?.latitude,
+        latitude:  locationData.coordinates?.latitude,
         longitude: locationData.coordinates?.longitude,
-        accuracy: locationData.coordinates?.accuracy,
+        accuracy:  locationData.coordinates?.accuracy,
       },
       displayName: locationData.displayName,
-      country: locationData.country,
-      city: locationData.city,
+      country:     locationData.country,
+      city:        locationData.city,
     };
-    
-    // Verify against taskplace if configured
-    if (this.taskplaceLocation?.coordinates && this.requireLocationVerification) {
+
+    if (this.taskplaceLocation?.coordinates) {
       const distance = calculateDistance(
         locationData.coordinates.latitude,
         locationData.coordinates.longitude,
         this.taskplaceLocation.coordinates.latitude,
-        this.taskplaceLocation.coordinates.longitude
+        this.taskplaceLocation.coordinates.longitude,
       );
-      
-      this.distanceFromTaskplace = distance;
-      this.isAtTaskplace = distance <= this.taskplaceRadius;
+      session.isAtTaskplace        = distance <= this.taskplaceRadius;
+      session.distanceFromTaskplace = distance;
     }
   }
-  
+
+  if (!this.activeSessions) this.activeSessions = [];
+  this.activeSessions.push(session);
+
+  // Keep legacy field: first start wins
+  if (!this.actualStartTime) this.actualStartTime = session.startTime;
+
+  // Mirror last-known location for legacy consumers
+  if (session.workLocation) {
+    this.workLocation          = session.workLocation;
+    this.isAtTaskplace         = session.isAtTaskplace ?? null;
+    this.distanceFromTaskplace = session.distanceFromTaskplace ?? null;
+  }
+
   await this.save();
   return this;
 };
 
-/**
- * End task execution (calculate time spent)
- */
-taskSchema.methods.endTaskExecution = async function() {
-  this.actualEndTime = new Date();
-  
-  if (this.actualStartTime) {
-    const timeSpentMs = this.actualEndTime - this.actualStartTime;
-    this.actualTimeSpent = timeSpentMs / (1000 * 60 * 60); // Convert to hours
-    
-    if (this.allocatedTimeHours) {
-      this.isWithinAllocatedTime = this.actualTimeSpent <= this.allocatedTimeHours;
-      this.timeOverrun = this.actualTimeSpent > this.allocatedTimeHours
-        ? this.actualTimeSpent - this.allocatedTimeHours
-        : 0;
-    }
+// END — close only this user's session
+taskSchema.methods.endTaskExecution = async function(userId) {
+  if (!this.activeSessions) this.activeSessions = [];
+
+  const idx = this.activeSessions
+    .findIndex(s => s.userId.toString() === userId.toString());
+  if (idx === -1) throw new Error('No active session found for this user');
+
+  const session   = this.activeSessions[idx];
+  const endTime   = new Date();
+  const spentHrs  = (endTime - session.startTime) / (1000 * 60 * 60);
+
+  const completed = {
+    userId:       session.userId,
+    startTime:    session.startTime,
+    endTime,
+    timeSpentHours: spentHrs,
+    workLocation: session.workLocation,
+    isWithinAllocatedTime: this.allocatedTimeHours
+      ? spentHrs <= this.allocatedTimeHours : null,
+    timeOverrun: this.allocatedTimeHours && spentHrs > this.allocatedTimeHours
+      ? spentHrs - this.allocatedTimeHours : 0,
+  };
+
+  if (!this.completedSessions) this.completedSessions = [];
+  this.completedSessions.push(completed);
+  this.activeSessions.splice(idx, 1);
+
+  // Aggregate totals across all completed sessions
+  const total = this.completedSessions
+    .reduce((sum, s) => sum + (s.timeSpentHours || 0), 0);
+  this.actualTimeSpent = total;
+
+  // Legacy: mark end only when all sessions are closed
+  if (this.activeSessions.length === 0) {
+    this.actualEndTime        = endTime;
+    this.isWithinAllocatedTime = completed.isWithinAllocatedTime;
+    this.timeOverrun           = completed.timeOverrun;
   }
-  
+
   await this.save();
   return this;
 };
+
 
 /**
  * Calculate goal contribution

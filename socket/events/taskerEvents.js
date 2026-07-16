@@ -990,7 +990,7 @@ function buildScheduleDescription(frequency, reportingTime) {
         }
       }
 
-      await task.startTaskExecution(locationData);
+     await task.startTaskExecution(locationData, userId);
 
       if (task.status === 'todo') {
         task.status = 'inProgress';
@@ -1029,7 +1029,7 @@ function buildScheduleDescription(frequency, reportingTime) {
         return;
       }
 
-      await task.endTaskExecution();
+      await task.endTaskExecution(userId);
       await task.populate('assignedTo createdBy');
       const project = await Project.findById(task.projectId);
 
@@ -1501,6 +1501,24 @@ function buildScheduleDescription(frequency, reportingTime) {
       requireLocationVerification: task.requireLocationVerification ?? false,
       actualStartTime: task.actualStartTime ?? null,
       actualEndTime: task.actualEndTime ?? null,
+      activeSessions: (task.activeSessions || []).map(s => ({
+  userId:               s.userId?.toString(),
+  startTime:            s.startTime,
+  workLocation:         s.workLocation ?? null,
+  isAtTaskplace:        s.isAtTaskplace ?? null,
+  distanceFromTaskplace:s.distanceFromTaskplace ?? null,
+})),
+completedSessions: (task.completedSessions || []).map(s => ({
+  userId:               s.userId?.toString(),
+  startTime:            s.startTime,
+  endTime:              s.endTime,
+  timeSpentHours:       s.timeSpentHours,
+  isWithinAllocatedTime:s.isWithinAllocatedTime,
+  timeOverrun:          s.timeOverrun,
+})),
+      actualStartTime:  task.actualStartTime  ?? null,
+actualEndTime:    task.actualEndTime    ?? null,
+checkedInBy:      task.checkedInBy?.toString() ?? null,
       actualTimeSpent: task.actualTimeSpent ?? null,
       isWithinAllocatedTime: task.isWithinAllocatedTime ?? null,
       timeOverrun: task.timeOverrun ?? null,

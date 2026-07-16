@@ -279,7 +279,7 @@ for (const ws of allSettings) {
 
         await sendPushNotificationWithFallback({
           userId: new mongoose.Types.ObjectId(uid),
-          title:  `⏰ Report time in ${WARNING_MINUTES_BEFORE} min`,
+          title:  `Report time in ${WARNING_MINUTES_BEFORE} min`,
           body:   `${count} unchecked task${count > 1 ? 's' : ''}: ${preview}${more}`,
           data: {
             type:     'checklist_report_warning',
