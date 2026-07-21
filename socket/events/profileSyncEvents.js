@@ -563,7 +563,7 @@ socket.on('pull_changes', async ({ profileId, userId, boxNames = [], lastSyncTim
 
             const profileName = await _getProfileName(profileId);
 
-            await notifyUser(lastPusherIdStr, {
+          /*  await notifyUser(lastPusherIdStr, {
               title:    `🔽 ${pullerName} pulled your changes`,
               body:     `${pullerName} just synced the latest data you pushed to "${profileName}".`,
               type:     'alert',
@@ -577,7 +577,7 @@ socket.on('pull_changes', async ({ profileId, userId, boxNames = [], lastSyncTim
                 profileName,
               },
             }).catch(e => console.warn(`[profileSync] pull notify failed for ${lastPusherIdStr}:`, e.message));
-
+                 */
             console.log(`📲 Pull notified offline pusher ${lastPusherIdStr}`);
           } else {
             console.log(`📲 Original pusher is online — skipping pull push notification`);
