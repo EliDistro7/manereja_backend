@@ -734,6 +734,85 @@ exports.deleteNotification = async (req, res) => {
 };
 
 
+// ═══════════════════════════════════════════════════
+// POST /api/admin/subscriptions/renew-all
+// Body (all optional):
+//   durationMonths   – default 1
+//   statuses         – array of statuses to include,
+//                      default ["active","trial","expired"]
+//   packageId        – filter by package (optional)
+//   sendEmails       – bool, default false (bulk email
+//                      can be noisy; opt-in)
+// ═══════════════════════════════════════════════════
+exports.renewAllSubscriptions = async (req, res) => {
+  try {
+    const {
+      durationMonths = 1,
+      statuses       = ["active", "trial", "expired"],
+      packageId,
+      sendEmails     = false,
+    } = req.body;
+
+    // 1. Build the filter
+    const filter = { status: { $in: statuses } };
+    if (packageId) filter.packageId = packageId;
+
+    // 2. Fetch matching subscriptions (with user + package for emails)
+    const subs = await UserPackageSubscription.find(filter)
+      .populate("packageId", "displayName")
+      .populate("userId",    "name email");
+
+    if (!subs.length) return fail(res, "No subscriptions match the given filters.", 404);
+
+    // 3. Renew each one — sub.renew() pushes expiryDate forward and
+    //    saves the doc (it's a schema method in your model)
+    const results = await Promise.allSettled(
+      subs.map(sub => sub.renew(durationMonths, 0))   // paymentAmount = 0 (admin gift)
+    );
+
+    const succeeded = results.filter(r => r.status === "fulfilled").length;
+    const failed    = results.filter(r => r.status === "rejected").length;
+
+    // 4. Optional bulk email
+    if (sendEmails) {
+      await Promise.allSettled(
+        subs.map((sub, i) => {
+          if (results[i].status !== "fulfilled") return Promise.resolve();
+          if (!sub.userId?.email)                return Promise.resolve();
+          return adminEmail.sendSubscriptionRenewed(sub.userId.email, {
+            userName:       sub.userId.name,
+            packageName:    sub.packageId?.displayName ?? "Your Package",
+            newExpiryDate:  fmtDate(sub.expiryDate),
+            durationMonths,
+          });
+        })
+      );
+    }
+
+    // 5. Single activity log entry for the bulk op
+    await req.admin.logActivity("subscriptions:bulk_renew", {
+      meta: {
+        filter:        { statuses, packageId: packageId ?? "all" },
+        durationMonths,
+        total:         subs.length,
+        succeeded,
+        failed,
+      },
+    }, req);
+
+    return ok(res, {
+      message:    `Bulk renewal complete.`,
+      total:      subs.length,
+      succeeded,
+      failed,
+    });
+  } catch (e) {
+    console.error("renewAllSubscriptions:", e);
+    return fail(res, "Server error.");
+  }
+};
+
+
 // ═════════════════════════════════════════════════════════════════════════════
 // ANALYTICS
 // ═════════════════════════════════════════════════════════════════════════════

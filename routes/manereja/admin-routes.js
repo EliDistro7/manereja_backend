@@ -78,8 +78,10 @@ router.post  ("/users/:id/suspend",     can("users:update"), ctrl.suspendUser);
 router.post  ("/users/:id/reactivate",  can("users:update"), ctrl.reactivateUser);
 
 // ── Subscriptions ─────────────────────────────────────────────────────────────
+// ── Subscriptions ─────────────────────────────────────────────────────────────
 router.get   ("/subscriptions",               can("subscriptions:read"),   ctrl.listSubscriptions);
 router.post  ("/subscriptions/grant",         can("subscriptions:create"), ctrl.grantSubscription);
+router.post  ("/subscriptions/renew-all",     can("subscriptions:update"), ctrl.renewAllSubscriptions);  // ← ADD before :id routes
 router.post  ("/subscriptions/:id/renew",     can("subscriptions:update"), ctrl.renewSubscription);
 router.post  ("/subscriptions/:id/cancel",    can("subscriptions:cancel"), ctrl.cancelSubscription);
 router.patch ("/subscriptions/:id/expiry",    can("subscriptions:update"), ctrl.updateSubscriptionExpiry);

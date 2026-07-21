@@ -309,9 +309,9 @@ static deleteUserByEmail = async (email) => {
     }
 
     // Check if user is using local auth
-    if (user.authType !== 'local') {
-      return this.errorResponse(res, 'Please use the appropriate sign-in method', 401);
-    }
+   // if (user.authType !== 'local') {
+   //   return this.errorResponse(res, 'Please use the appropriate sign-in method', 401);
+  //  }
 
     // Check password
     const isValidPassword = await user.comparePassword(password);
