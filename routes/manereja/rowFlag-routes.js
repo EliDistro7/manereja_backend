@@ -1,6 +1,6 @@
 // routes/rowFlagRoutes.js
 const express = require('express');
-const router = express.Router();
+const router  = express.Router();
 const { authenticateToken } = require('../../middleware/auth');
 
 const {
@@ -9,9 +9,13 @@ const {
   listRowFlags,
   resolveAnomaly,
   reopenAnomaly,
-  advancePipelineStage,
+  movePipelineStage,
+  getPipelineStagesForProfile,
+  updatePipelineStagesForProfile,
   deleteRowFlag,
   markFlagRead,
+  updateFlagTitle,
+  reassignFlag,
 } = require('../../controllers/manereja/rowFlagController');
 
 const {
@@ -27,15 +31,22 @@ const {
 
 router.use(authenticateToken);
 
+// ── Pipeline stage config (profile-scoped) ────────────────────────────────────
+router.get('/pipeline-stages/:profileId',  getPipelineStagesForProfile);
+router.put('/pipeline-stages/:profileId',  updatePipelineStagesForProfile);
+
 // ── RowFlag core ──────────────────────────────────────────────────────────────
 router.post('/',                           createRowFlag);
 router.get('/',                            listRowFlags);
 router.get('/:id',                         getRowFlag);
+router.patch('/:id',                       updateFlagTitle);
+router.patch('/:id/reassign',              reassignFlag);
 router.patch('/:id/resolve',               resolveAnomaly);
 router.patch('/:id/reopen',                reopenAnomaly);
-router.patch('/:id/advance-stage',         advancePipelineStage);
+router.patch('/:id/move-stage',            movePipelineStage);
 router.delete('/:id',                      deleteRowFlag);
-router.patch('/:id/read', markFlagRead);
+router.patch('/:id/read',                  markFlagRead);
+
 // ── Thread messages ───────────────────────────────────────────────────────────
 router.post('/:id/messages',               postMessage);
 router.get('/:id/messages',                getMessages);
@@ -43,8 +54,7 @@ router.get('/:id/messages',                getMessages);
 // ── Scheduled messages ────────────────────────────────────────────────────────
 router.post('/:id/scheduled-messages',     createScheduledMessage);
 router.get('/:id/scheduled-messages',      listScheduledMessages);
-
-// Cancellation lives on the scheduled message itself, not on the flag
-router.delete('/scheduled-messages/:id',   cancelScheduledMessage);
+router.delete('/scheduled-messages/:msgId', cancelScheduledMessage);
 
 module.exports = router;
+

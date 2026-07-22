@@ -574,7 +574,7 @@ socket.on('pull_changes', async ({ profileId, userId, boxNames = [], lastSyncTim
                 profileId:   profileId.toString(),
                 pulledBy:    userIdStr,
                 pullerName,
-                profileName,
+                profileName
               },
             }).catch(e => console.warn(`[profileSync] pull notify failed for ${lastPusherIdStr}:`, e.message));
                  */

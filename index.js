@@ -34,6 +34,7 @@ const authEmailRoutes = require('./routes/manereja/auth_email.js');
 const seedAdmin = require('./models/manereja/seed_admin.js');
 const adminRoutes = require('./routes/manereja/admin-routes.js');
 const fcmTokenRoutes = require('./routes/manereja/fcm-token-routes.js');
+const pipelineReports = require('./routes/manereja/pipeline-report-routes.js');
 
 const rowFlagRoutes   = require('./routes/manereja/rowFlag-routes');
 const startRowFlagCron = require('./jobs/rowFlagCron');
@@ -153,6 +154,7 @@ app.use('/emails', emailRoutes);
 app.use('/api/system-notifications', systemNotificationRoutes);
 
 app.use('/api/row-flags', rowFlagRoutes);
+app.use('/api/pipelines', pipelineReports);
 
 app.use('/api/emails',authEmailRoutes);
 
