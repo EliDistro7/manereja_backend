@@ -344,24 +344,25 @@ function buildScheduleDescription(frequency, reportingTime) {
   // FORMATTERS
   // ==========================================
 
-  function formatReportTemplate(template) {
-    return {
-      _id:                      template._id.toString(),
-      id:                       template._id.toString(),
-      projectId:                template.projectId.toString(),
-      businessProfileId:        template.businessProfileId.toString(),
-      createdBy:                template.createdBy.toString(),
-      name:                     template.name,
-      description:              template.description,
-      columns:                  template.columns,
-      requiresApproval:         template.requiresApproval,
-      allowMultipleSubmissions: template.allowMultipleSubmissions,
-      submissionFrequency:      template.submissionFrequency,
-      reportingTime:            template.reportingTime ?? '18:00',
-      createdAt:                template.createdAt,
-      updatedAt:                template.updatedAt,
-    };
-  }
+function formatReportTemplate(template) {
+  return {
+    _id:                      template._id.toString(),
+    id:                       template._id.toString(),
+    projectId:                template.projectId.toString(),
+    businessProfileId:        template.businessProfileId.toString(),
+    createdBy:                template.createdBy.toString(),
+    name:                     template.name,
+    description:              template.description,
+    columns:                  template.columns,
+    requiresApproval:         template.requiresApproval,
+    allowMultipleSubmissions: template.allowMultipleSubmissions,
+    submissionFrequency:      template.submissionFrequency,
+    reportingTime:            template.reportingTime ?? '18:00',
+    isDeleted:                template.isDeleted ?? false,   // ← add
+    createdAt:                template.createdAt,
+    updatedAt:                template.updatedAt,
+  };
+}
 
   function formatReportSubmission(submission) {
     return {
@@ -616,28 +617,31 @@ socket.on('connection_ready', async ({ userId, businessProfileId }) => {
   // ==========================================
   // GET REPORT TEMPLATES FOR BUSINESS PROFILE
   // ==========================================
-  socket.on('get_report_templates_by_profile', async ({ businessProfileId, userId }) => {
-    log(`get_report_templates_by_profile → userId: ${userId}, profileId: ${businessProfileId}`);
-    try {
-      if (!businessProfileId || businessProfileId.toString().trim() === '') {
-        warn('get_report_templates_by_profile → businessProfileId is missing');
-        socket.emit('tasker_error', { error: 'businessProfileId is required' });
-        return;
-      }
-
-      const templates = await ReportTemplate.find({ businessProfileId, ...notDeleted() })
-        .sort({ createdAt: -1 });
-
-      ok(`get_report_templates_by_profile → found ${templates.length} template(s) for profile ${businessProfileId}`);
-      socket.emit('report_templates_list', {
-        businessProfileId,
-        templates: templates.map(t => formatReportTemplate(t)),
-      });
-    } catch (error) {
-      err('get_report_templates_by_profile failed:', error);
-      socket.emit('tasker_error', { error: 'Failed to fetch report templates' });
+socket.on('get_report_templates_by_profile', async ({ businessProfileId, userId, includeDeleted }) => {
+  log(`get_report_templates_by_profile → userId: ${userId}, profileId: ${businessProfileId}, includeDeleted: ${includeDeleted ?? false}`);
+  try {
+    if (!businessProfileId || businessProfileId.toString().trim() === '') {
+      warn('get_report_templates_by_profile → businessProfileId is missing');
+      socket.emit('tasker_error', { error: 'businessProfileId is required' });
+      return;
     }
-  });
+
+    // When includeDeleted is true (admin fetching the trash tab) skip the notDeleted filter
+    const deletedFilter = includeDeleted ? {} : notDeleted();
+
+    const templates = await ReportTemplate.find({ businessProfileId, ...deletedFilter })
+      .sort({ createdAt: -1 });
+
+    ok(`get_report_templates_by_profile → found ${templates.length} template(s) for profile ${businessProfileId} (includeDeleted: ${includeDeleted ?? false})`);
+    socket.emit('report_templates_list', {
+      businessProfileId,
+      templates: templates.map(t => formatReportTemplate(t)),
+    });
+  } catch (error) {
+    err('get_report_templates_by_profile failed:', error);
+    socket.emit('tasker_error', { error: 'Failed to fetch report templates' });
+  }
+});
 
   // ==========================================
   // ATTACH REPORT TEMPLATE TO TASK
@@ -680,12 +684,12 @@ socket.on('attach_report_template_to_task', async ({ taskId, templateId, userId 
     }
 
     // ── 4. Template lookup ────────────────────────────────────────────────
-    const template = await ReportTemplate.findById(templateId);
-    if (!template) {
-      warn(`attach_report_template_to_task → ❌ template ${templateId} NOT FOUND`);
-      socket.emit('tasker_error', { error: 'Report template not found' });
-      return;
-    }
+ const template = await ReportTemplate.findById(templateId);
+if (!template || template.isDeleted) {
+  warn(`attach_report_template_to_task → ❌ template ${templateId} NOT FOUND or deleted`);
+  socket.emit('tasker_error', { error: 'Report template not found' });
+  return;
+}
     debug(`attach_report_template_to_task → template: "${template.name}", frequency: "${template.submissionFrequency}", reportingTime: "${template.reportingTime}"`);
 
     // ── 5. Write metadata ─────────────────────────────────────────────────
@@ -758,17 +762,68 @@ socket.on('attach_report_template_to_task', async ({ taskId, templateId, userId 
   }
 });
 
+
+// ==========================================
+// UNDELETE REPORT TEMPLATE
+// ==========================================
+socket.on('undelete_report_template', async ({ templateId, userId }) => {
+  log(`undelete_report_template → userId: ${userId}, templateId: ${templateId}`);
+  try {
+    // findById sees all docs regardless of isDeleted, which is what we want here
+    const template = await ReportTemplate.findById(templateId);
+    if (!template) {
+      warn(`undelete_report_template → template ${templateId} not found`);
+      socket.emit('tasker_error', { error: 'Template not found' });
+      return;
+    }
+
+    if (!template.isDeleted) {
+      warn(`undelete_report_template → template ${templateId} is not deleted — nothing to do`);
+      socket.emit('tasker_error', { error: 'Template is not deleted' });
+      return;
+    }
+
+    const profile = await BusinessProfile.findById(template.businessProfileId);
+    if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+      warn(`undelete_report_template → access denied for userId ${userId}`);
+      socket.emit('tasker_error', { error: 'Only owner or admin can restore templates' });
+      return;
+    }
+
+    template.isDeleted = false;
+    template.deletedAt = undefined;
+    template.updatedAt = new Date();
+    await template.save();
+
+    ok(`undelete_report_template → ✅ restored template ${templateId}`);
+
+    const formatted = formatReportTemplate(template);
+
+    socket.emit('report_template_undeleted', { success: true, template: formatted });
+
+    const project = await Project.findById(template.projectId);
+    if (project) {
+      await broadcastToProject(project, 'report_template_undeleted', { template: formatted });
+    }
+
+  } catch (error) {
+    err('undelete_report_template failed:', error);
+    socket.emit('tasker_error', { error: 'Failed to restore template', details: error.message });
+  }
+});
+
+
   // ==========================================
   // UPDATE REPORT TEMPLATE
   // ==========================================
   socket.on('update_report_template', async ({ templateId, updates, userId }) => {
     log(`update_report_template → userId: ${userId}, templateId: ${templateId}`);
     try {
-      const template = await ReportTemplate.findById(templateId);
-      if (!template) {
-        socket.emit('tasker_error', { error: 'Template not found' });
-        return;
-      }
+     const template = await ReportTemplate.findById(templateId);
+if (!template || template.isDeleted) {
+  socket.emit('tasker_error', { error: 'Template not found' });
+  return;
+}
 
       const profile = await BusinessProfile.findById(template.businessProfileId);
       if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
@@ -1638,6 +1693,50 @@ socket.on('add_consolidated_report_row', async ({ taskId, templateId, rowData, u
   } catch (error) {
     err('add_consolidated_report_row failed:', error);
     socket.emit('tasker_error', { error: 'Failed to add report row', details: error.message });
+  }
+});
+
+// ==========================================
+// DELETE REPORT TEMPLATE
+// ==========================================
+socket.on('delete_report_template', async ({ templateId, userId }) => {
+  log(`delete_report_template → userId: ${userId}, templateId: ${templateId}`);
+  try {
+    const template = await ReportTemplate.findById(templateId);
+    if (!template) {
+      warn(`delete_report_template → template ${templateId} not found`);
+      socket.emit('tasker_error', { error: 'Template not found' });
+      return;
+    }
+
+    const profile = await BusinessProfile.findById(template.businessProfileId);
+    if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+      warn(`delete_report_template → access denied for userId ${userId}`);
+      socket.emit('tasker_error', { error: 'Only owner or admin can delete templates' });
+      return;
+    }
+
+    // Soft-delete to match the notDeleted() filter pattern used everywhere
+    template.isDeleted = true;
+    template.updatedAt = new Date();
+    await template.save();
+
+    console.log('templated deleted succesfully');
+
+    ok(`delete_report_template → ✅ soft-deleted template ${templateId}`);
+
+    const formatted = formatReportTemplate(template);
+
+    socket.emit('report_template_deleted', { success: true, templateId });
+
+    const project = await Project.findById(template.projectId);
+    if (project) {
+      await broadcastToProject(project, 'report_template_deleted', { templateId });
+    }
+
+  } catch (error) {
+    err('delete_report_template failed:', error);
+    socket.emit('tasker_error', { error: 'Failed to delete template', details: error.message });
   }
 });
 
