@@ -1359,6 +1359,71 @@ function buildScheduleDescription(frequency, reportingTime) {
     }
   });
 
+
+  // ==========================================
+// DELETE TASK (Owner/Admin)
+// ==========================================
+socket.on('delete_task', async ({ taskId, userId }) => {
+  try {
+    const task = await Task.findById(taskId);
+    if (!task) {
+      socket.emit('tasker_error', { error: 'Task not found' });
+      return;
+    }
+
+    const project = await Project.findById(task.projectId);
+    if (!project) {
+      socket.emit('tasker_error', { error: 'Project not found' });
+      return;
+    }
+
+    const profile = await BusinessProfile.findById(project.businessProfileId);
+    if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+      socket.emit('tasker_error', { error: 'Only owner or admin can delete tasks' });
+      return;
+    }
+
+    // Soft-delete the task and its related data
+    task.isDeleted = true;
+    task.deletedAt = new Date();
+    task.deletedBy = userId;
+    await task.save();
+
+    const commentsResult = await TaskComment.updateMany(
+      { taskId, ...notDeleted() },
+      { isDeleted: true, deletedAt: new Date() }
+    );
+    const milestonesResult = await TaskMilestone.updateMany(
+      { taskId, ...notDeleted() },
+      { isDeleted: true, deletedAt: new Date() }
+    );
+
+    // Recalculate project progress now that a weighted task is gone
+    const updatedProject = await updateProjectProgress(task.projectId);
+
+    broadcastToProject(io, userSockets, project, 'task_deleted', {
+      taskId:           task._id.toString(),
+      projectId:        task.projectId.toString(),
+      deletedBy:        userId,
+      projectProgress:  updatedProject.progressPercentage,
+      remainingWeight:  100 - updatedProject.totalTaskWeight,
+      cascade: {
+        commentsDeleted:   commentsResult.modifiedCount,
+        milestonesDeleted: milestonesResult.modifiedCount,
+      },
+    });
+
+    socket.emit('task_deleted_success', {
+      taskId:    task._id.toString(),
+      projectId: task.projectId.toString(),
+      message:   'Task and related data have been deleted',
+    });
+  } catch (error) {
+    console.error('❌ Error deleting task:', error);
+    socket.emit('tasker_error', { error: 'Failed to delete task', details: error.message });
+  }
+});
+
   socket.on('suggest_task_weights', async ({ projectId, numberOfTasks, taskPriorities }) => {
     try {
       const userId = socketToUser[socket.id];
