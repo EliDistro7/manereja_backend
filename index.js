@@ -36,11 +36,16 @@ const adminRoutes = require('./routes/manereja/admin-routes.js');
 const fcmTokenRoutes = require('./routes/manereja/fcm-token-routes.js');
 const pipelineReports = require('./routes/manereja/pipeline-report-routes.js');
 
+
 const rowFlagRoutes   = require('./routes/manereja/rowFlag-routes');
+const rowReportRoutes = require('./routes/manereja/rowReport-routes');
 const startRowFlagCron = require('./jobs/rowFlagCron');
 const startPendingNotificationCron = require('./jobs/pendingNotificationCronJob');
 const { userSockets } = require('./socket/base');
 const startTaskChecklistNotificationCron = require('./jobs/taskChecklistNotificationCron');
+
+
+//const { authenticate } = require('./middleware/auth');
 
 //require('./cron/expireSubscriptions');
 
@@ -157,5 +162,7 @@ app.use('/api/row-flags', rowFlagRoutes);
 app.use('/api/pipelines', pipelineReports);
 
 app.use('/api/emails',authEmailRoutes);
+
+app.use('/api/row-reports', rowReportRoutes);
 
 

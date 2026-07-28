@@ -25,8 +25,10 @@ const {
 
 const {
   createScheduledMessage,
+  updateScheduledMessage,   // ← added
   cancelScheduledMessage,
   listScheduledMessages,
+  forwardMessage,           // ← added
 } = require('../../controllers/manereja/scheduledMessageController');
 
 router.use(authenticateToken);
@@ -50,11 +52,12 @@ router.patch('/:id/read',                  markFlagRead);
 // ── Thread messages ───────────────────────────────────────────────────────────
 router.post('/:id/messages',               postMessage);
 router.get('/:id/messages',                getMessages);
+router.post('/:id/messages/forward',       forwardMessage);           // ← added
 
 // ── Scheduled messages ────────────────────────────────────────────────────────
 router.post('/:id/scheduled-messages',     createScheduledMessage);
 router.get('/:id/scheduled-messages',      listScheduledMessages);
+router.patch('/scheduled-messages/:msgId', updateScheduledMessage);   // ← added
 router.delete('/scheduled-messages/:msgId', cancelScheduledMessage);
 
 module.exports = router;
-

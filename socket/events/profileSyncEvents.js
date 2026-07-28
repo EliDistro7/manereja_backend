@@ -459,7 +459,7 @@ socket.on('push_changes', async ({
               ? affectedBoxes.join(', ')
               : `${affectedBoxes.slice(0, 3).join(', ')} +${affectedBoxes.length - 3} more`;
 
-            await Promise.allSettled(offlineMemberIds.map(memberId =>
+     /*       await Promise.allSettled(offlineMemberIds.map(memberId =>
               notifyUser(memberId, {
                 title:    `🔼 ${pusherName} synced data`,
                 body:     `${pusherName} pushed ${changeType === 'selective' ? 'selective' : 'full'} changes to "${profileName}" — ${stats.totalItems} item(s) across ${boxSummary}.`,
@@ -477,6 +477,7 @@ socket.on('push_changes', async ({
                 },
               }).catch(e => console.warn(`[profileSync] push notify failed for ${memberId}:`, e.message))
             ));
+            */
 
             console.log(`📲 Push notified ${offlineMemberIds.length} offline member(s)`);
           } else {

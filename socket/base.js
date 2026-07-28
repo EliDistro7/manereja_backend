@@ -11,6 +11,7 @@ const profileSyncEvents = require('./events/profileSyncEvents.js');
 const packageNotificationService = require('./events/packageNotificationService.js');
 const rowFlagEvents = require('./events/rowFlagEvents');
 const registerChecklistHandlers = require('./events/taskChecklistHandler');
+const rowReportEvents = require('./events/rowReportEvents');
 
 const User = require('../models/manereja/user.js');
 
@@ -122,7 +123,7 @@ function _cleanupProfileRooms(socketId) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-function initSocket(server) {
+function initSocket(server,app) {
   io = socketIo(server, {
     cors: {
       origin: process.env.ORIGIN,
@@ -131,6 +132,8 @@ function initSocket(server) {
       pingTimeout: 5000,
     },
   });
+
+   
 
   console.log('Socket.io initialized');
 
@@ -149,6 +152,7 @@ function initSocket(server) {
     NotificationsEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
     //CashflowEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
     rowFlagEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
+    rowReportEvents(io, socket, userSockets, roomSocketsMap, socketToUser);  
     registerChecklistHandlers(socket, io, userSockets);
     // Note: packageNotificationService is a service, not a socket event module.
     // Call it only if it expects to be invoked per-connection.

@@ -1422,7 +1422,7 @@ socket.on('delete_task', async ({ taskId, userId }) => {
     console.error('❌ Error deleting task:', error);
     socket.emit('tasker_error', { error: 'Failed to delete task', details: error.message });
   }
-});
+})
 
   socket.on('suggest_task_weights', async ({ projectId, numberOfTasks, taskPriorities }) => {
     try {
