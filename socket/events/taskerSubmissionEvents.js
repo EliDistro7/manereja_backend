@@ -639,7 +639,7 @@ socket.on('get_report_templates_by_profile', async ({ businessProfileId, userId,
     });
   } catch (error) {
     err('get_report_templates_by_profile failed:', error);
-    socket.emit('tasker_error', { error: 'Failed to fetch report templates' });
+    socket.emit('tasker_error', { error: 'Failed to fetch report templates' })
   }
 });
 

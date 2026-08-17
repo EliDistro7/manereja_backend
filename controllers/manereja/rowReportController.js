@@ -293,6 +293,118 @@ exports.pauseRowReport = async (req, res) => {
   }
 };
 
+
+// POST /api/row-reports/:id/sheets/bulk-submit
+// Body: { sheetIds: string[] }
+exports.bulkSubmitSheets = async (req, res) => {
+  try {
+    const report = await RowReport.findById(req.params.id);
+    if (!report) return res.status(404).json({ message: 'Report not found' });
+
+    assertAssignee(report, req.user.userId);
+
+    if (report.status === 'cancelled') {
+      return res.status(400).json({ message: 'Workflow is cancelled' });
+    }
+
+    const { sheetIds } = req.body;
+    if (!Array.isArray(sheetIds) || sheetIds.length === 0) {
+      return res.status(400).json({ message: 'sheetIds must be a non-empty array' });
+    }
+
+    const results   = [];
+    const failures  = [];
+
+    for (const sheetId of sheetIds) {
+      try {
+        const sheet = await RowReportSheet.findOne({
+          _id:         sheetId,
+          rowReportId: req.params.id,
+        });
+
+        if (!sheet) {
+          failures.push({ sheetId, reason: 'Not found' });
+          continue;
+        }
+
+        if (!['pending', 'rejected'].includes(sheet.status)) {
+          failures.push({ sheetId, reason: `Cannot submit a ${sheet.status} sheet` });
+          continue;
+        }
+
+        // Server-side required-field validation — mirrors saveSheet
+        const missing = (report.fields || []).filter((f) => {
+          if (!f.required) return false;
+          const val = sheet.data[f.id];
+          return val === null || val === undefined || String(val).trim() === '';
+        });
+
+        if (missing.length > 0) {
+          failures.push({
+            sheetId,
+            cycleNumber: sheet.cycleNumber,
+            reason: 'Required fields missing',
+            fields: missing.map((f) => ({ id: f.id, label: f.label })),
+          });
+          continue;
+        }
+
+        sheet.status        = 'submitted';
+        sheet.submittedAt   = new Date();
+        if (sheet.rejectionNote) sheet.rejectionNote = undefined;
+        await sheet.save();
+
+        results.push(sheet.toObject());
+
+        _emit(req, report._id, 'row_report_sheet_submitted', {
+          reportId:    report._id.toString(),
+          sheet:       sheet.toObject(),
+          cycleNumber: sheet.cycleNumber,
+        });
+      } catch (innerErr) {
+        failures.push({ sheetId, reason: innerErr.message });
+      }
+    }
+
+    if (results.length > 0) {
+      _notifyManager(report, {
+        title: 'Report Sheets Submitted',
+        body: `${results.length} sheet${results.length > 1 ? 's' : ''} for "${report.contextHeader}" ${results.length > 1 ? 'have' : 'has'} been submitted for review.`,
+        type: 'info',
+        metadata: { rowReportId: report._id.toString() },
+      });
+    }
+
+    return res.json({
+      submitted: results,
+      failed:    failures,
+    });
+  } catch (err) {
+    if (err.status === 403) return res.status(403).json({ message: err.message });
+    console.error('bulkSubmitSheets:', err);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+
+// GET /api/row-reports/sheets/bulk?reportIds=id1,id2,...
+exports.listSheetsBulk = async (req, res) => {
+  const ids = req.query.reportIds?.split(',').filter(Boolean) ?? [];
+  if (!ids.length) return res.json({ sheetsByReport: {} });
+
+  const sheets = await RowReportSheet.find({ rowReportId: { $in: ids } })
+    .sort({ cycleNumber: 1 })
+    .lean();
+
+  // Group by reportId
+  const grouped = {};
+  for (const sheet of sheets) {
+    const key = sheet.rowReportId.toString();
+    (grouped[key] ??= []).push(sheet);
+  }
+  return res.json({ sheetsByReport: grouped });
+};
+
 // PATCH /api/row-reports/:id/resume
 exports.resumeRowReport = async (req, res) => {
   try {

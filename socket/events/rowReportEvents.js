@@ -32,7 +32,7 @@ module.exports = function rowReportEvents(io, socket, userSockets, roomSocketsMa
 
   function getRoomName(reportId) {
     return `row_report_${reportId}`;
-  }
+  };
 
   /** Resolve userId from the reverse map (same pattern as rowFlagEvents) */
   function getCallerId() {
