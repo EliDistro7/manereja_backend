@@ -12,6 +12,7 @@ const packageNotificationService = require('./events/packageNotificationService.
 const rowFlagEvents = require('./events/rowFlagEvents');
 const registerChecklistHandlers = require('./events/taskChecklistHandler');
 const rowReportEvents = require('./events/rowReportEvents');
+const noticeEvents = require('./events/noticeEvents');
 
 const User = require('../models/manereja/user.js');
 
@@ -154,6 +155,9 @@ function initSocket(server,app) {
     rowFlagEvents(io, socket, userSockets, roomSocketsMap, socketToUser);
     rowReportEvents(io, socket, userSockets, roomSocketsMap, socketToUser);  
     registerChecklistHandlers(socket, io, userSockets);
+      noticeEvents(io, socket, userSockets);
+    
+
     // Note: packageNotificationService is a service, not a socket event module.
     // Call it only if it expects to be invoked per-connection.
     // packageNotificationService(io, socket, userSockets, roomSocketsMap, socketToUser);
