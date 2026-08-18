@@ -14,7 +14,7 @@ const registerChecklistHandlers = require('./events/taskChecklistHandler');
 const rowReportEvents = require('./events/rowReportEvents');
 const noticeEvents = require('./events/noticeEvents');
 
-const User = require('../models/manereja/user.js');
+const User = require('../models/manereja/user.js')
 
 const getUserDetails = async (userId) => {
   return await User.findById(userId);
