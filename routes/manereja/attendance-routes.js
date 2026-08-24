@@ -304,7 +304,7 @@ const WorkplaceSettingsSchema = new mongoose.Schema({
 
   isActive: {
     type: Boolean,
-    default: true
+    default: true,
   },
 
   createdAt: {
