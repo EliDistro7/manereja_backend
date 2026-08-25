@@ -16,11 +16,7 @@ const {
   canUpdateTaskWeight,
 } = require('./taskerHelper');
 
-
-
-
 // ─── Shared helper: matches docs where isDeleted is false OR field doesn't exist ─
-// Fixes silent data loss on older documents that never had isDeleted set.
 function notDeleted() {
   return { $or: [{ isDeleted: false }, { isDeleted: { $exists: false } }] };
 }
@@ -28,85 +24,77 @@ function notDeleted() {
 
 module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, socketToUser) {
 
-// ── place this right after the emitToUser function definition ──────────────
-
-function formatReportTemplate(template) {
-  return {
-    _id:                      template._id.toString(),
-    id:                       template._id.toString(),
-    projectId:                template.projectId.toString(),
-    businessProfileId:        template.businessProfileId.toString(),
-    createdBy:                template.createdBy.toString(),
-    name:                     template.name,
-    description:              template.description,
-    columns:                  template.columns,
-    requiresApproval:         template.requiresApproval,
-    allowMultipleSubmissions: template.allowMultipleSubmissions,
-    submissionFrequency:      template.submissionFrequency,
-    reportingTime:            template.reportingTime,
-    createdAt:                template.createdAt,
-    updatedAt:                template.updatedAt,
-  };
-}
-
-
-async function notifyAssigneeOfTaskTemplate(task, newAssigneeIds) {
-  const templateId = task.metadata?.get?.('reportTemplateId')
-    ?? (task.metadata instanceof Map
-        ? task.metadata.get('reportTemplateId')
-        : task.metadata?.reportTemplateId);
-  if (!templateId) return;
-
-  const template = await ReportTemplate.findById(templateId);
-  if (!template) return;
-
-  const formattedTemplate = formatReportTemplate(template);
-  const formattedTask     = formatTask(task);
-
-  const scheduleDescription = buildScheduleDescription(
-    template.submissionFrequency,
-    template.reportingTime,
-  );
-
-  for (const assigneeId of newAssigneeIds) {
-    // Socket (online)
-    emitToUser(assigneeId, 'report_template_attached_to_your_task', {
-      task:     formattedTask,
-      template: formattedTemplate,
-    });
-
-    // Push (offline / backgrounded)
-    notifyUser(assigneeId, {
-      title:    `📋 Report required for "${task.title}"`,
-      body:     `You must submit ${scheduleDescription} using the "${template.name}" template.`,
-      type:     'info',
-      priority: 'normal',
-      persist:  true,
-      metadata: {
-        event:               'template_attached',
-        taskId:              task._id.toString(),
-        templateId:          templateId.toString(),
-        taskTitle:           task.title,
-        templateName:        template.name,
-        submissionFrequency: template.submissionFrequency,
-        reportingTime:       template.reportingTime,
-      },
-      actions: [{ label: 'View task', deepLink: `/tasks/${task._id}`, isPrimary: true }],
-    }).catch(e => console.warn(`[taskerEvents] push failed for ${assigneeId}:`, e.message));
+  function formatReportTemplate(template) {
+    return {
+      _id:                      template._id.toString(),
+      id:                       template._id.toString(),
+      projectId:                template.projectId.toString(),
+      businessProfileId:        template.businessProfileId.toString(),
+      createdBy:                template.createdBy.toString(),
+      name:                     template.name,
+      description:              template.description,
+      columns:                  template.columns,
+      requiresApproval:         template.requiresApproval,
+      allowMultipleSubmissions: template.allowMultipleSubmissions,
+      submissionFrequency:      template.submissionFrequency,
+      reportingTime:            template.reportingTime,
+      createdAt:                template.createdAt,
+      updatedAt:                template.updatedAt,
+    };
   }
-}
 
-function buildScheduleDescription(frequency, reportingTime) {
-  const time = reportingTime ?? '18:00';
-  switch (frequency) {
-    case 'daily':    return `a daily report by ${time}`;
-    case 'weekly':   return `a weekly report by ${time}`;
-    case 'monthly':  return `a monthly report by ${time}`;
-    case 'per-task': return 'a report when the task is completed';
-    default:         return `a ${frequency} report by ${time}`;
+  async function notifyAssigneeOfTaskTemplate(task, newAssigneeIds) {
+    const templateId = task.metadata?.get?.('reportTemplateId')
+      ?? (task.metadata instanceof Map
+          ? task.metadata.get('reportTemplateId')
+          : task.metadata?.reportTemplateId);
+    if (!templateId) return;
+
+    const template = await ReportTemplate.findById(templateId);
+    if (!template) return;
+
+    const formattedTemplate = formatReportTemplate(template);
+    const formattedTask     = formatTask(task);
+    const scheduleDescription = buildScheduleDescription(
+      template.submissionFrequency,
+      template.reportingTime,
+    );
+
+    for (const assigneeId of newAssigneeIds) {
+      emitToUser(assigneeId, 'report_template_attached_to_your_task', {
+        task: formattedTask, template: formattedTemplate,
+      });
+
+      notifyUser(assigneeId, {
+        title:    `📋 Report required for "${task.title}"`,
+        body:     `You must submit ${scheduleDescription} using the "${template.name}" template.`,
+        type:     'info',
+        priority: 'normal',
+        persist:  true,
+        metadata: {
+          event:               'template_attached',
+          taskId:              task._id.toString(),
+          templateId:          templateId.toString(),
+          taskTitle:           task.title,
+          templateName:        template.name,
+          submissionFrequency: template.submissionFrequency,
+          reportingTime:       template.reportingTime,
+        },
+        actions: [{ label: 'View task', deepLink: `/tasks/${task._id}`, isPrimary: true }],
+      }).catch(e => console.warn(`[taskerEvents] push failed for ${assigneeId}:`, e.message));
+    }
   }
-}
 
+  function buildScheduleDescription(frequency, reportingTime) {
+    const time = reportingTime ?? '18:00';
+    switch (frequency) {
+      case 'daily':    return `a daily report by ${time}`;
+      case 'weekly':   return `a weekly report by ${time}`;
+      case 'monthly':  return `a monthly report by ${time}`;
+      case 'per-task': return 'a report when the task is completed';
+      default:         return `a ${frequency} report by ${time}`;
+    }
+  }
 
   // ==========================================
   // GET PROJECTS LIST
@@ -129,7 +117,6 @@ function buildScheduleDescription(frequency, reportingTime) {
         return;
       }
 
-      // ✅ FIX: notDeleted() catches older docs where isDeleted was never set
       const projects = await Project.find({ businessProfileId, ...notDeleted() })
         .populate('createdBy', 'name email')
         .sort({ updatedAt: -1 })
@@ -151,7 +138,6 @@ function buildScheduleDescription(frequency, reportingTime) {
   }) => {
     try {
       const profile = await BusinessProfile.findById(businessProfileId);
-      // ✅ FIX #1: was profile.ownerId.toString() !== userId (owner-only)
       if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
         socket.emit('tasker_error', { error: 'Only owner or admin can create projects' });
         return;
@@ -179,8 +165,6 @@ function buildScheduleDescription(frequency, reportingTime) {
     }
   });
 
-  
-
   // ==========================================
   // UPDATE PROJECT
   // ==========================================
@@ -190,7 +174,6 @@ function buildScheduleDescription(frequency, reportingTime) {
       if (!project) { socket.emit('tasker_error', { error: 'Project not found' }); return; }
 
       const profile = await BusinessProfile.findById(project.businessProfileId);
-      // ✅ FIX #2: was profile.ownerId.toString() !== userId (owner-only)
       if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
         socket.emit('tasker_error', { error: 'Only owner or admin can update projects' });
         return;
@@ -218,7 +201,6 @@ function buildScheduleDescription(frequency, reportingTime) {
       if (!project) { socket.emit('tasker_error', { error: 'Project not found' }); return; }
 
       const profile = await BusinessProfile.findById(project.businessProfileId);
-      // ✅ FIX #3: was profile.ownerId.toString() !== userId (owner-only)
       if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
         socket.emit('tasker_error', { error: 'Only owner or admin can delete projects' });
         return;
@@ -247,9 +229,9 @@ function buildScheduleDescription(frequency, reportingTime) {
         projectId: project._id.toString(),
         deletedBy: userId,
         cascade: {
-          tasksDeleted: tasksResult.modifiedCount,
-          commentsDeleted: commentsResult.modifiedCount,
-          milestonesDeleted: milestonesResult.modifiedCount,
+          tasksDeleted:       tasksResult.modifiedCount,
+          commentsDeleted:    commentsResult.modifiedCount,
+          milestonesDeleted:  milestonesResult.modifiedCount,
           invitationsRemoved: invitationsResult.deletedCount,
         }
       });
@@ -273,13 +255,11 @@ function buildScheduleDescription(frequency, reportingTime) {
       if (!project) { socket.emit('tasker_error', { error: 'Project not found' }); return; }
 
       const profile = await BusinessProfile.findById(project.businessProfileId);
-      // ✅ FIX #5: was profile.ownerId.toString() !== userId (owner-only)
       if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
         socket.emit('tasker_error', { error: 'Only owner or admin can add members' });
         return;
       }
 
-      // ✅ FIX: use profile.hasAccess() instead of bracket notation on Mongoose Map
       if (!profile.hasAccess(memberId)) {
         socket.emit('tasker_error', { error: 'User not in business profile' });
         return;
@@ -316,7 +296,6 @@ function buildScheduleDescription(frequency, reportingTime) {
         return;
       }
 
-      // ✅ FIX: notDeleted() catches older tasks where isDeleted was never set
       const tasks = await Task.find({ projectId, ...notDeleted() })
         .populate('assignedTo', 'name email profilePicture')
         .populate('createdBy', 'name email')
@@ -339,8 +318,11 @@ function buildScheduleDescription(frequency, reportingTime) {
     projectId, title, description, assignedTo,
     dueDate, startDate, priority, weightPercentage,
     estimatedHours, tags, allocatedTimeHours,
-    taskplaceLocation, taskplaceRadius,
-    requireLocationVerification, userId
+    // Legacy single location
+    taskplaceLocation, taskplaceRadius, requireLocationVerification,
+    // ✅ NEW: multi-location assignments
+    taskplaceAssignments,
+    userId,
   }) => {
     try {
       const project = await Project.findById(projectId);
@@ -370,7 +352,20 @@ function buildScheduleDescription(frequency, reportingTime) {
         }
       }
 
-      if (taskplaceLocation) {
+      // ── Validate location inputs ──────────────────────────────────────────
+      // Multi-location assignments take priority; fall back to legacy single.
+      const hasAssignments = Array.isArray(taskplaceAssignments) && taskplaceAssignments.length > 0;
+
+      if (hasAssignments) {
+        for (const a of taskplaceAssignments) {
+          if (!a.location?.coordinates?.latitude || !a.location?.coordinates?.longitude) {
+            socket.emit('tasker_error', {
+              error: `Invalid coordinates in taskplace assignment "${a.label ?? a.id}"`
+            });
+            return;
+          }
+        }
+      } else if (taskplaceLocation) {
         if (!taskplaceLocation.coordinates?.latitude || !taskplaceLocation.coordinates?.longitude) {
           socket.emit('tasker_error', {
             error: 'Invalid taskplace location: coordinates are required'
@@ -396,18 +391,27 @@ function buildScheduleDescription(frequency, reportingTime) {
         assignedTo: assignees,
         createdBy: userId,
         startDate: startDate ? new Date(startDate) : null,
-        dueDate: dueDate ? new Date(dueDate) : null,
-        priority: priority || 'medium',
+        dueDate:   dueDate   ? new Date(dueDate)   : null,
+        priority:  priority  || 'medium',
         weightPercentage: taskWeight,
-        estimatedHours: estimatedHours || null,
+        estimatedHours:   estimatedHours   || null,
         allocatedTimeHours: allocatedTimeHours || null,
-        taskplaceLocation: taskplaceLocation || null,
-        taskplaceRadius: taskplaceLocation ? (taskplaceRadius || 0.5) : null,
-        requireLocationVerification: taskplaceLocation ? (requireLocationVerification || false) : false,
         tags: tags || [],
         status: 'todo',
         createdAt: new Date(), updatedAt: new Date(),
       });
+
+      // ── Attach location data ──────────────────────────────────────────────
+      if (hasAssignments) {
+        newTask.taskplaceAssignments = taskplaceAssignments;
+        // Derive top-level requireLocationVerification from any assignment that needs it
+        newTask.requireLocationVerification =
+          taskplaceAssignments.some(a => a.requireLocationVerification === true);
+      } else if (taskplaceLocation) {
+        newTask.taskplaceLocation            = taskplaceLocation;
+        newTask.taskplaceRadius              = taskplaceRadius || 0.5;
+        newTask.requireLocationVerification  = requireLocationVerification || false;
+      }
 
       await newTask.save();
       await newTask.populate('assignedTo', 'name email profilePicture');
@@ -415,7 +419,7 @@ function buildScheduleDescription(frequency, reportingTime) {
 
       await notifyAssigneeOfTaskTemplate(newTask, assignees);
 
-      const formattedTask = formatTask(newTask);
+      const formattedTask  = formatTask(newTask);
       const updatedProject = await updateProjectProgress(projectId);
 
       let goalContribution = null;
@@ -432,8 +436,7 @@ function buildScheduleDescription(frequency, reportingTime) {
 
       for (const assigneeId of assignees) {
         emitToUser(assigneeId, 'task_assigned_to_you', {
-          task: formattedTask,
-          assignedBy: userId,
+          task: formattedTask, assignedBy: userId,
           assignedByName: newTask.createdBy.name,
           goalContribution,
         });
@@ -482,15 +485,13 @@ function buildScheduleDescription(frequency, reportingTime) {
       }
 
       const oldAssignees = task.assignedTo.map(id => id.toString());
-
       task.assignedTo = newAssignees;
-      task.updatedAt = new Date();
+      task.updatedAt  = new Date();
       await task.save();
-        
-      // ✅ Notify newly added assignees of any attached report template
+
       const added = newAssignees.filter(id => !oldAssignees.includes(id));
       if (added.length > 0) await notifyAssigneeOfTaskTemplate(task, added);
-      
+
       await task.populate('assignedTo', 'name email profilePicture');
       await task.populate('createdBy', 'name email');
 
@@ -499,8 +500,6 @@ function buildScheduleDescription(frequency, reportingTime) {
       broadcastToProject(io, userSockets, project, 'task_assigned', {
         task: formattedTask, oldAssignees, newAssignees, assignedBy: userId,
       });
-
-   
 
       const removed = oldAssignees.filter(id => !newAssignees.includes(id));
       for (const id of removed) {
@@ -533,24 +532,20 @@ function buildScheduleDescription(frequency, reportingTime) {
         return;
       }
 
-      // ✅ use hasAccess() — safe for Mongoose Map
       if (!profile.hasAccess(assigneeId)) {
-        console.log('User is not in this business profile');
         socket.emit('tasker_error', { error: 'User is not in this business profile' });
         return;
       }
 
       const alreadyAssigned = task.assignedTo.some(id => id.toString() === assigneeId);
       if (alreadyAssigned) {
-        console.log('User is already assigned');
         socket.emit('tasker_error', {
           error: 'User is already assigned to this task',
-          taskId: taskId,
+          taskId,
         });
         return;
       }
 
-      // Auto-add to project.memberIds if not already there
       if (!project.memberIds.map(id => id.toString()).includes(assigneeId)) {
         project.memberIds.push(assigneeId);
         project.updatedAt = new Date();
@@ -599,12 +594,14 @@ function buildScheduleDescription(frequency, reportingTime) {
       }
 
       if (task.assignedTo.length <= 1) {
-        socket.emit('tasker_error', { error: 'Cannot remove the last assignee. Assign someone else first.' });
+        socket.emit('tasker_error', {
+          error: 'Cannot remove the last assignee. Assign someone else first.'
+        });
         return;
       }
 
       task.assignedTo = task.assignedTo.filter(id => id.toString() !== assigneeId);
-      task.updatedAt = new Date();
+      task.updatedAt  = new Date();
       await task.save();
       await task.populate('assignedTo', 'name email profilePicture');
       await task.populate('createdBy', 'name email');
@@ -661,7 +658,7 @@ function buildScheduleDescription(frequency, reportingTime) {
 
       const oldAssignees = task.assignedTo.map(id => id.toString());
       task.assignedTo = newAssignees;
-      task.updatedAt = new Date();
+      task.updatedAt  = new Date();
       await task.save();
       await task.populate('assignedTo', 'name email profilePicture');
       await task.populate('createdBy', 'name email');
@@ -717,7 +714,7 @@ function buildScheduleDescription(frequency, reportingTime) {
       const project = await Project.findById(task.projectId);
       const profile = await BusinessProfile.findById(project.businessProfileId);
 
-      const isOwner = profile.ownerId.toString() === userId;
+      const isOwner    = profile.ownerId.toString() === userId;
       const isAssignee = task.isAssignee(userId);
 
       if (!isOwner && !isAssignee) {
@@ -728,7 +725,7 @@ function buildScheduleDescription(frequency, reportingTime) {
       const oldStatus = task.status;
       task.status = newStatus;
       if (newStatus === 'completed') {
-        task.completedAt = new Date();
+        task.completedAt        = new Date();
         task.progressPercentage = 100;
       }
 
@@ -769,7 +766,7 @@ function buildScheduleDescription(frequency, reportingTime) {
       if (progressNotes) task.progressNotes = progressNotes;
 
       if (progressPercentage === 100 && task.status !== 'completed') {
-        task.status = 'completed';
+        task.status      = 'completed';
         task.completedAt = new Date();
       }
 
@@ -815,11 +812,12 @@ function buildScheduleDescription(frequency, reportingTime) {
         return;
       }
 
-      const allowedFields = ['title', 'description', 'priority', 'dueDate', 'startDate', 'estimatedHours', 'tags'];
+      const allowedFields = [
+        'title', 'description', 'priority',
+        'dueDate', 'startDate', 'estimatedHours', 'tags',
+      ];
       for (const field of allowedFields) {
-        if (updates[field] !== undefined) {
-          task[field] = updates[field];
-        }
+        if (updates[field] !== undefined) task[field] = updates[field];
       }
 
       task.updatedAt = new Date();
@@ -828,9 +826,7 @@ function buildScheduleDescription(frequency, reportingTime) {
       await task.populate('createdBy', 'name email');
 
       broadcastToProject(io, userSockets, project, 'task_updated', {
-        task: formatTask(task),
-        updateType: 'fields_updated',
-        updatedBy: userId,
+        task: formatTask(task), updateType: 'fields_updated', updatedBy: userId,
       });
 
       socket.emit('task_update_success', { success: true, task: formatTask(task) });
@@ -842,14 +838,17 @@ function buildScheduleDescription(frequency, reportingTime) {
 
   // ==========================================
   // UPDATE TASK TASKPLACE SETTINGS
+  // ✅ Updated: accepts taskplaceAssignments (multi-location) or legacy single
   // ==========================================
   socket.on('update_task_taskplace', async ({
-    taskId, taskplaceLocation, taskplaceRadius,
-    requireLocationVerification, allocatedTimeHours, userId
+    taskId, userId,
+    // Legacy single location
+    taskplaceLocation, taskplaceRadius, requireLocationVerification,
+    // ✅ NEW: full replacement of the assignments list
+    taskplaceAssignments,
+    allocatedTimeHours,
   }) => {
     try {
-      console.log(`\n📍 [update_task_taskplace] taskId: ${taskId}`);
-
       const task = await Task.findById(taskId);
       if (!task) { socket.emit('tasker_error', { error: 'Task not found' }); return; }
 
@@ -862,18 +861,39 @@ function buildScheduleDescription(frequency, reportingTime) {
         return;
       }
 
-      if (taskplaceLocation) {
-        if (!taskplaceLocation.coordinates?.latitude || !taskplaceLocation.coordinates?.longitude) {
+      const hasAssignments = Array.isArray(taskplaceAssignments) && taskplaceAssignments.length > 0;
+
+      if (hasAssignments) {
+        // Validate all assignment coordinates
+        for (const a of taskplaceAssignments) {
+          if (!a.location?.coordinates?.latitude || !a.location?.coordinates?.longitude) {
+            socket.emit('tasker_error', {
+              error: `Invalid coordinates in taskplace assignment "${a.label ?? a.id}"`
+            });
+            return;
+          }
+        }
+        // Replace the full list; clear legacy single location
+        task.taskplaceAssignments           = taskplaceAssignments;
+        task.taskplaceLocation              = null;
+        task.taskplaceRadius                = null;
+        task.requireLocationVerification    =
+          taskplaceAssignments.some(a => a.requireLocationVerification === true);
+      } else {
+        // Legacy path — null is allowed (clears the location)
+        if (taskplaceLocation &&
+            (!taskplaceLocation.coordinates?.latitude || !taskplaceLocation.coordinates?.longitude)) {
           socket.emit('tasker_error', {
             error: 'Invalid taskplace location: coordinates are required'
           });
           return;
         }
+        task.taskplaceAssignments           = [];
+        task.taskplaceLocation              = taskplaceLocation || null;
+        task.taskplaceRadius                = taskplaceLocation ? (taskplaceRadius ?? 0.5) : null;
+        task.requireLocationVerification    = taskplaceLocation
+          ? (requireLocationVerification ?? false) : false;
       }
-
-      task.taskplaceLocation = taskplaceLocation || null;
-      task.taskplaceRadius = taskplaceLocation ? (taskplaceRadius ?? 0.5) : null;
-      task.requireLocationVerification = taskplaceLocation ? (requireLocationVerification ?? false) : false;
 
       if (allocatedTimeHours !== undefined) {
         task.allocatedTimeHours = allocatedTimeHours > 0 ? allocatedTimeHours : null;
@@ -891,10 +911,176 @@ function buildScheduleDescription(frequency, reportingTime) {
       });
 
       socket.emit('taskplace_update_success', { success: true, task: formattedTask });
-      console.log(`📍 [update_task_taskplace] ✅ Done`);
     } catch (error) {
       console.error('❌ Error updating taskplace:', error);
       socket.emit('tasker_error', { error: 'Failed to update taskplace settings', details: error.message });
+    }
+  });
+
+  // ==========================================
+  // ADD TASKPLACE ASSIGNMENT
+  // Appends one assignment to task.taskplaceAssignments.
+  // ==========================================
+  socket.on('add_taskplace_assignment', async ({ taskId, assignment, userId }) => {
+    try {
+      const task = await Task.findById(taskId);
+      if (!task) { socket.emit('tasker_error', { error: 'Task not found' }); return; }
+
+      const project = await Project.findById(task.projectId);
+      const profile = await BusinessProfile.findById(project.businessProfileId);
+
+      if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+        socket.emit('tasker_error', { error: 'Only owner or admin can update taskplace settings' });
+        return;
+      }
+
+      if (!assignment?.location?.coordinates?.latitude ||
+          !assignment?.location?.coordinates?.longitude) {
+        socket.emit('tasker_error', {
+          error: 'Invalid assignment: location coordinates are required'
+        });
+        return;
+      }
+
+      // Prevent duplicate id
+      const duplicate = (task.taskplaceAssignments || [])
+        .some(a => a.id === assignment.id);
+      if (duplicate) {
+        socket.emit('tasker_error', {
+          error: `Assignment with id "${assignment.id}" already exists on this task`
+        });
+        return;
+      }
+
+      task.taskplaceAssignments.push(assignment);
+      // Keep top-level flag in sync
+      task.requireLocationVerification =
+        task.taskplaceAssignments.some(a => a.requireLocationVerification === true);
+      task.updatedAt = new Date();
+      await task.save();
+      await task.populate('assignedTo', 'name email profilePicture');
+      await task.populate('createdBy', 'name email');
+
+      const formattedTask = formatTask(task);
+
+      broadcastToProject(io, userSockets, project, 'taskplace_assignment_added', {
+        task: formattedTask, addedAssignmentId: assignment.id, updatedBy: userId,
+      });
+
+      socket.emit('taskplace_assignment_added', { success: true, task: formattedTask });
+    } catch (error) {
+      console.error('❌ Error adding taskplace assignment:', error);
+      socket.emit('tasker_error', { error: 'Failed to add taskplace assignment', details: error.message });
+    }
+  });
+
+  // ==========================================
+  // REMOVE TASKPLACE ASSIGNMENT
+  // Removes one assignment by its id.
+  // ==========================================
+  socket.on('remove_taskplace_assignment', async ({ taskId, assignmentId, userId }) => {
+    try {
+      const task = await Task.findById(taskId);
+      if (!task) { socket.emit('tasker_error', { error: 'Task not found' }); return; }
+
+      const project = await Project.findById(task.projectId);
+      const profile = await BusinessProfile.findById(project.businessProfileId);
+
+      if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+        socket.emit('tasker_error', { error: 'Only owner or admin can update taskplace settings' });
+        return;
+      }
+
+      const before = (task.taskplaceAssignments || []).length;
+      task.taskplaceAssignments =
+        (task.taskplaceAssignments || []).filter(a => a.id !== assignmentId);
+
+      if (task.taskplaceAssignments.length === before) {
+        socket.emit('tasker_error', {
+          error: `Assignment "${assignmentId}" not found on this task`
+        });
+        return;
+      }
+
+      // Re-sync top-level flag
+      task.requireLocationVerification =
+        task.taskplaceAssignments.some(a => a.requireLocationVerification === true);
+      task.updatedAt = new Date();
+      await task.save();
+      await task.populate('assignedTo', 'name email profilePicture');
+      await task.populate('createdBy', 'name email');
+
+      const formattedTask = formatTask(task);
+
+      broadcastToProject(io, userSockets, project, 'taskplace_assignment_removed', {
+        task: formattedTask, removedAssignmentId: assignmentId, updatedBy: userId,
+      });
+
+      socket.emit('taskplace_assignment_removed', { success: true, task: formattedTask });
+    } catch (error) {
+      console.error('❌ Error removing taskplace assignment:', error);
+      socket.emit('tasker_error', { error: 'Failed to remove taskplace assignment', details: error.message });
+    }
+  });
+
+  // ==========================================
+  // UPDATE TASKPLACE ASSIGNMENT
+  // Replaces one assignment in place, matched by assignment.id.
+  // ==========================================
+  socket.on('update_taskplace_assignment', async ({ taskId, assignment, userId }) => {
+    try {
+      const task = await Task.findById(taskId);
+      if (!task) { socket.emit('tasker_error', { error: 'Task not found' }); return; }
+
+      const project = await Project.findById(task.projectId);
+      const profile = await BusinessProfile.findById(project.businessProfileId);
+
+      if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+        socket.emit('tasker_error', { error: 'Only owner or admin can update taskplace settings' });
+        return;
+      }
+
+      if (!assignment?.id) {
+        socket.emit('tasker_error', { error: 'Assignment id is required' });
+        return;
+      }
+
+      if (!assignment?.location?.coordinates?.latitude ||
+          !assignment?.location?.coordinates?.longitude) {
+        socket.emit('tasker_error', {
+          error: 'Invalid assignment: location coordinates are required'
+        });
+        return;
+      }
+
+      const idx = (task.taskplaceAssignments || [])
+        .findIndex(a => a.id === assignment.id);
+
+      if (idx === -1) {
+        socket.emit('tasker_error', {
+          error: `Assignment "${assignment.id}" not found on this task`
+        });
+        return;
+      }
+
+      task.taskplaceAssignments[idx] = assignment;
+      task.requireLocationVerification =
+        task.taskplaceAssignments.some(a => a.requireLocationVerification === true);
+      task.updatedAt = new Date();
+      await task.save();
+      await task.populate('assignedTo', 'name email profilePicture');
+      await task.populate('createdBy', 'name email');
+
+      const formattedTask = formatTask(task);
+
+      broadcastToProject(io, userSockets, project, 'taskplace_assignment_updated', {
+        task: formattedTask, updatedAssignmentId: assignment.id, updatedBy: userId,
+      });
+
+      socket.emit('taskplace_assignment_updated', { success: true, task: formattedTask });
+    } catch (error) {
+      console.error('❌ Error updating taskplace assignment:', error);
+      socket.emit('tasker_error', { error: 'Failed to update taskplace assignment', details: error.message });
     }
   });
 
@@ -909,8 +1095,6 @@ function buildScheduleDescription(frequency, reportingTime) {
       const project = await Project.findById(task.projectId);
       const profile = await BusinessProfile.findById(project.businessProfileId);
 
-      // ℹ️  Intentionally owner-only: task weight allocation is a strategic decision.
-      //     Change to isOwnerOrAdmin(profile, userId) if admins should also manage weights.
       if (!profile || profile.ownerId.toString() !== userId) {
         socket.emit('tasker_error', { error: 'Only owner can update task weights' });
         return;
@@ -922,9 +1106,9 @@ function buildScheduleDescription(frequency, reportingTime) {
         return;
       }
 
-      const oldWeight = task.weightPercentage;
-      task.weightPercentage = newWeight;
-      task.updatedAt = new Date();
+      const oldWeight        = task.weightPercentage;
+      task.weightPercentage  = newWeight;
+      task.updatedAt         = new Date();
       await task.save();
 
       const updatedProject = await updateProjectProgress(task.projectId);
@@ -938,8 +1122,8 @@ function buildScheduleDescription(frequency, reportingTime) {
 
       broadcastToProject(io, userSockets, project, 'task_weight_updated', {
         taskId: task._id.toString(), oldWeight, newWeight,
-        projectProgress: updatedProject.progressPercentage,
-        remainingWeight: 100 - updatedProject.totalTaskWeight,
+        projectProgress:  updatedProject.progressPercentage,
+        remainingWeight:  100 - updatedProject.totalTaskWeight,
         goalContribution, updatedBy: userId,
       });
 
@@ -956,6 +1140,8 @@ function buildScheduleDescription(frequency, reportingTime) {
 
   // ==========================================
   // START TASK EXECUTION
+  // ✅ Updated: location verification now uses taskplaceForEmployee()
+  //    so each assignee is checked against their own required location.
   // ==========================================
   socket.on('start_task_execution', async ({ taskId, locationData, userId }) => {
     try {
@@ -967,30 +1153,40 @@ function buildScheduleDescription(frequency, reportingTime) {
         return;
       }
 
-      if (task.requireLocationVerification && task.taskplaceLocation?.coordinates) {
+      // Resolve this user's required taskplace (per-assignment or legacy)
+      const resolvedLocation = task.taskplaceLocationForEmployee(userId);
+      const resolvedRadius   = task.taskplaceRadiusForEmployee(userId);
+      const assignment       = task.taskplaceForEmployee(userId);
+      const needsVerification = assignment
+        ? assignment.requireLocationVerification
+        : task.requireLocationVerification;
+
+      if (needsVerification && resolvedLocation?.coordinates?.latitude != null) {
         if (!locationData?.coordinates?.latitude || !locationData?.coordinates?.longitude) {
-          socket.emit('tasker_error', { error: 'Location coordinates are required to start this task' });
+          socket.emit('tasker_error', {
+            error: 'Location coordinates are required to start this task'
+          });
           return;
         }
 
         const distance = calculateDistance(
           locationData.coordinates.latitude,
           locationData.coordinates.longitude,
-          task.taskplaceLocation.coordinates.latitude,
-          task.taskplaceLocation.coordinates.longitude
+          resolvedLocation.coordinates.latitude,
+          resolvedLocation.coordinates.longitude,
         );
 
-        if (distance > task.taskplaceRadius) {
+        if (distance > resolvedRadius) {
           socket.emit('tasker_error', {
-            error: `You are ${distance.toFixed(2)} km away from taskplace. Maximum allowed: ${task.taskplaceRadius} km`,
-            distanceFromTaskplace: distance,
-            taskplaceDisplayName: task.taskplaceLocation.displayName,
+            error: `You are ${distance.toFixed(2)} km away from taskplace. Maximum allowed: ${resolvedRadius} km`,
+            distanceFromTaskplace:  distance,
+            taskplaceDisplayName:   resolvedLocation.displayName,
           });
           return;
         }
       }
 
-     await task.startTaskExecution(locationData, userId);
+      await task.startTaskExecution(locationData, userId);
 
       if (task.status === 'todo') {
         task.status = 'inProgress';
@@ -1002,12 +1198,13 @@ function buildScheduleDescription(frequency, reportingTime) {
 
       broadcastToProject(io, userSockets, project, 'task_execution_started', {
         task: formatTask(task), startedBy: userId,
-        isAtTaskplace: task.isAtTaskplace,
-        distanceFromTaskplace: task.distanceFromTaskplace,
+        // Reflect this user's session values, not the legacy top-level fields
+        isAtTaskplace:         task.sessionFor?.(userId)?.isAtTaskplace         ?? task.isAtTaskplace,
+        distanceFromTaskplace: task.sessionFor?.(userId)?.distanceFromTaskplace ?? task.distanceFromTaskplace,
       });
     } catch (error) {
       console.error('❌ Error starting task execution:', error);
-      socket.emit('tasker_error', { error: 'Failed to start task execution' });
+      socket.emit('tasker_error', { error: error.message || 'Failed to start task execution' });
     }
   });
 
@@ -1024,8 +1221,11 @@ function buildScheduleDescription(frequency, reportingTime) {
         return;
       }
 
-      if (!task.actualStartTime) {
-        socket.emit('tasker_error', { error: 'Task execution was not started' });
+      // Check this user has an active session (endTaskExecution will throw if not)
+      const hasSession = (task.activeSessions || [])
+        .some(s => s.userId.toString() === userId.toString());
+      if (!hasSession) {
+        socket.emit('tasker_error', { error: 'No active session found for this user' });
         return;
       }
 
@@ -1035,14 +1235,14 @@ function buildScheduleDescription(frequency, reportingTime) {
 
       broadcastToProject(io, userSockets, project, 'task_execution_ended', {
         task: formatTask(task), endedBy: userId,
-        actualTimeSpent: task.actualTimeSpent,
-        allocatedTimeHours: task.allocatedTimeHours,
+        actualTimeSpent:       task.actualTimeSpent,
+        allocatedTimeHours:    task.allocatedTimeHours,
         isWithinAllocatedTime: task.isWithinAllocatedTime,
-        timeOverrun: task.timeOverrun,
+        timeOverrun:           task.timeOverrun,
       });
     } catch (error) {
       console.error('❌ Error ending task execution:', error);
-      socket.emit('tasker_error', { error: 'Failed to end task execution' });
+      socket.emit('tasker_error', { error: error.message || 'Failed to end task execution' });
     }
   });
 
@@ -1064,12 +1264,12 @@ function buildScheduleDescription(frequency, reportingTime) {
       milestone.completedAt = new Date();
       milestone.completedBy = userId;
       if (currentValue) milestone.currentValue = currentValue;
-      if (proofUrls) milestone.proofUrls = proofUrls;
+      if (proofUrls)    milestone.proofUrls    = proofUrls;
       milestone.updatedAt = new Date();
       await milestone.save();
 
-      task.completedMilestones += 1;
-      task.progressPercentage = (task.completedMilestones / task.milestones.length) * 100;
+      task.completedMilestones  += 1;
+      task.progressPercentage    = (task.completedMilestones / task.milestones.length) * 100;
       await task.save();
 
       const project = await Project.findById(task.projectId);
@@ -1099,11 +1299,10 @@ function buildScheduleDescription(frequency, reportingTime) {
   socket.on('verify_milestone', async ({ milestoneId, taskId, approved, notes, userId }) => {
     try {
       const milestone = await TaskMilestone.findById(milestoneId);
-      const task = await Task.findById(taskId);
-      const project = await Project.findById(task.projectId);
-      const profile = await BusinessProfile.findById(project.businessProfileId);
+      const task      = await Task.findById(taskId);
+      const project   = await Project.findById(task.projectId);
+      const profile   = await BusinessProfile.findById(project.businessProfileId);
 
-      // ✅ FIX #7: was profile.ownerId.toString() !== userId (owner-only)
       if (!(await isOwnerOrAdmin(profile, userId))) {
         socket.emit('tasker_error', { error: 'Only owner or admin can verify milestones' });
         return;
@@ -1129,7 +1328,7 @@ function buildScheduleDescription(frequency, reportingTime) {
       for (const assigneeId of task.assignedTo) {
         emitToUser(assigneeId.toString(), 'milestone_verified', {
           milestone: formatMilestone(milestone),
-          message: approved ? 'Your milestone has been verified!' : 'Milestone needs revision',
+          message:      approved ? 'Your milestone has been verified!' : 'Milestone needs revision',
           verifierNote: notes, approved,
         });
       }
@@ -1209,7 +1408,6 @@ function buildScheduleDescription(frequency, reportingTime) {
       if (!project) { socket.emit('tasker_error', { error: 'Project not found' }); return; }
 
       const profile = await BusinessProfile.findById(project.businessProfileId);
-      // ✅ FIX #4: was profile.ownerId.toString() !== userId (owner-only)
       if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
         socket.emit('tasker_error', { error: 'Only owner or admin can invite members' });
         return;
@@ -1238,11 +1436,13 @@ function buildScheduleDescription(frequency, reportingTime) {
       await invitation.populate('inviterId', 'name email');
 
       emitToUser(invitee._id.toString(), 'project_invitation_received', {
-        invitation: formatInvitation(invitation),
+        invitation:  formatInvitation(invitation),
         inviterName: invitation.inviterId.name, projectName: project.name,
       });
 
-      socket.emit('invitation_sent', { success: true, inviteeEmail, inviteeName: invitee.name });
+      socket.emit('invitation_sent', {
+        success: true, inviteeEmail, inviteeName: invitee.name,
+      });
     } catch (error) {
       socket.emit('tasker_error', { error: 'Failed to send invitation' });
     }
@@ -1252,8 +1452,12 @@ function buildScheduleDescription(frequency, reportingTime) {
     try {
       const invitation = await ProjectInvitation.findById(invitationId);
       if (!invitation) { socket.emit('tasker_error', { error: 'Invitation not found' }); return; }
-      if (invitation.inviteeId.toString() !== userId) { socket.emit('tasker_error', { error: 'Unauthorized' }); return; }
-      if (invitation.status !== 'pending') { socket.emit('tasker_error', { error: 'Invitation already processed' }); return; }
+      if (invitation.inviteeId.toString() !== userId) {
+        socket.emit('tasker_error', { error: 'Unauthorized' }); return;
+      }
+      if (invitation.status !== 'pending') {
+        socket.emit('tasker_error', { error: 'Invitation already processed' }); return;
+      }
 
       const project = await Project.findById(invitation.projectId);
       if (!project) { socket.emit('tasker_error', { error: 'Project not found' }); return; }
@@ -1264,12 +1468,13 @@ function buildScheduleDescription(frequency, reportingTime) {
         await project.save();
       }
 
-      invitation.status = 'accepted';
+      invitation.status      = 'accepted';
       invitation.respondedAt = new Date();
       await invitation.save();
 
       broadcastToProject(io, userSockets, project, 'project_member_added', {
-        projectId: project._id.toString(), memberId: userId, memberName: invitation.inviteeEmail,
+        projectId: project._id.toString(), memberId: userId,
+        memberName: invitation.inviteeEmail,
       });
 
       emitToUser(invitation.inviterId.toString(), 'invitation_accepted', {
@@ -1292,7 +1497,7 @@ function buildScheduleDescription(frequency, reportingTime) {
       if (invitation.status !== 'pending') {
         socket.emit('tasker_error', { error: 'Invitation already processed' }); return;
       }
-      invitation.status = 'rejected';
+      invitation.status      = 'rejected';
       invitation.respondedAt = new Date();
       await invitation.save();
 
@@ -1308,8 +1513,11 @@ function buildScheduleDescription(frequency, reportingTime) {
 
   socket.on('get_pending_invitations', async ({ userId }) => {
     try {
-      const invitations = await ProjectInvitation.find({ inviteeId: userId, status: 'pending' })
-        .populate('inviterId', 'name email').sort({ createdAt: -1 }).lean();
+      const invitations = await ProjectInvitation
+        .find({ inviteeId: userId, status: 'pending' })
+        .populate('inviterId', 'name email')
+        .sort({ createdAt: -1 })
+        .lean();
       socket.emit('pending_invitations_list', {
         invitations: invitations.map(formatInvitation),
       });
@@ -1329,13 +1537,14 @@ function buildScheduleDescription(frequency, reportingTime) {
       const project = await Project.findById(projectId);
       if (!project) { socket.emit('tasker_error', { error: 'Project not found' }); return; }
 
-      // ✅ FIX: notDeleted() for consistent task fetch
       const tasks = await Task.find({ projectId, ...notDeleted() }).lean();
       const weightAllocation = tasks.map(task => ({
-        taskId: task._id.toString(), title: task.title,
-        weight: task.weightPercentage || 0, progress: task.progressPercentage || 0,
+        taskId:            task._id.toString(),
+        title:             task.title,
+        weight:            task.weightPercentage || 0,
+        progress:          task.progressPercentage || 0,
         actualContribution: ((task.weightPercentage || 0) * (task.progressPercentage || 0)) / 100,
-        status: task.status,
+        status:            task.status,
       }));
 
       const totalAllocated = tasks.reduce((sum, t) => sum + (t.weightPercentage || 0), 0);
@@ -1344,8 +1553,11 @@ function buildScheduleDescription(frequency, reportingTime) {
       if (project.goalTargetValue) {
         const currentValue = (project.goalTargetValue * project.progressPercentage) / 100;
         goalInfo = {
-          description: project.goalDescription, targetValue: project.goalTargetValue,
-          currentValue, remainingValue: project.goalTargetValue - currentValue, unit: project.goalUnit,
+          description:    project.goalDescription,
+          targetValue:    project.goalTargetValue,
+          currentValue,
+          remainingValue: project.goalTargetValue - currentValue,
+          unit:           project.goalUnit,
         };
       }
 
@@ -1359,78 +1571,71 @@ function buildScheduleDescription(frequency, reportingTime) {
     }
   });
 
-
   // ==========================================
-// DELETE TASK (Owner/Admin)
-// ==========================================
-socket.on('delete_task', async ({ taskId, userId }) => {
-  try {
-    const task = await Task.findById(taskId);
-    if (!task) {
-      socket.emit('tasker_error', { error: 'Task not found' });
-      return;
+  // DELETE TASK (Owner/Admin)
+  // ==========================================
+  socket.on('delete_task', async ({ taskId, userId }) => {
+    try {
+      const task = await Task.findById(taskId);
+      if (!task) { socket.emit('tasker_error', { error: 'Task not found' }); return; }
+
+      const project = await Project.findById(task.projectId);
+      if (!project) { socket.emit('tasker_error', { error: 'Project not found' }); return; }
+
+      const profile = await BusinessProfile.findById(project.businessProfileId);
+      if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
+        socket.emit('tasker_error', { error: 'Only owner or admin can delete tasks' });
+        return;
+      }
+
+      task.isDeleted = true;
+      task.deletedAt = new Date();
+      task.deletedBy = userId;
+      await task.save();
+
+      const commentsResult = await TaskComment.updateMany(
+        { taskId, ...notDeleted() },
+        { isDeleted: true, deletedAt: new Date() }
+      );
+      const milestonesResult = await TaskMilestone.updateMany(
+        { taskId, ...notDeleted() },
+        { isDeleted: true, deletedAt: new Date() }
+      );
+
+      const updatedProject = await updateProjectProgress(task.projectId);
+
+      broadcastToProject(io, userSockets, project, 'task_deleted', {
+        taskId:          task._id.toString(),
+        projectId:       task.projectId.toString(),
+        deletedBy:       userId,
+        projectProgress: updatedProject.progressPercentage,
+        remainingWeight: 100 - updatedProject.totalTaskWeight,
+        cascade: {
+          commentsDeleted:   commentsResult.modifiedCount,
+          milestonesDeleted: milestonesResult.modifiedCount,
+        },
+      });
+
+      socket.emit('task_deleted_success', {
+        taskId:    task._id.toString(),
+        projectId: task.projectId.toString(),
+        message:   'Task and related data have been deleted',
+      });
+    } catch (error) {
+      console.error('❌ Error deleting task:', error);
+      socket.emit('tasker_error', { error: 'Failed to delete task', details: error.message });
     }
-
-    const project = await Project.findById(task.projectId);
-    if (!project) {
-      socket.emit('tasker_error', { error: 'Project not found' });
-      return;
-    }
-
-    const profile = await BusinessProfile.findById(project.businessProfileId);
-    if (!profile || !(await isOwnerOrAdmin(profile, userId))) {
-      socket.emit('tasker_error', { error: 'Only owner or admin can delete tasks' });
-      return;
-    }
-
-    // Soft-delete the task and its related data
-    task.isDeleted = true;
-    task.deletedAt = new Date();
-    task.deletedBy = userId;
-    await task.save();
-
-    const commentsResult = await TaskComment.updateMany(
-      { taskId, ...notDeleted() },
-      { isDeleted: true, deletedAt: new Date() }
-    );
-    const milestonesResult = await TaskMilestone.updateMany(
-      { taskId, ...notDeleted() },
-      { isDeleted: true, deletedAt: new Date() }
-    );
-
-    // Recalculate project progress now that a weighted task is gone
-    const updatedProject = await updateProjectProgress(task.projectId);
-
-    broadcastToProject(io, userSockets, project, 'task_deleted', {
-      taskId:           task._id.toString(),
-      projectId:        task.projectId.toString(),
-      deletedBy:        userId,
-      projectProgress:  updatedProject.progressPercentage,
-      remainingWeight:  100 - updatedProject.totalTaskWeight,
-      cascade: {
-        commentsDeleted:   commentsResult.modifiedCount,
-        milestonesDeleted: milestonesResult.modifiedCount,
-      },
-    });
-
-    socket.emit('task_deleted_success', {
-      taskId:    task._id.toString(),
-      projectId: task.projectId.toString(),
-      message:   'Task and related data have been deleted',
-    });
-  } catch (error) {
-    console.error('❌ Error deleting task:', error);
-    socket.emit('tasker_error', { error: 'Failed to delete task', details: error.message });
-  }
-})
+  });
 
   socket.on('suggest_task_weights', async ({ projectId, numberOfTasks, taskPriorities }) => {
     try {
       const userId = socketToUser[socket.id];
       if (!userId) { socket.emit('tasker_error', { error: 'User not authenticated' }); return; }
 
-      const validation = await validateTaskWeight(projectId, 0);
-      const suggestions = suggestTaskWeights(validation.remainingWeight, numberOfTasks, taskPriorities);
+      const validation  = await validateTaskWeight(projectId, 0);
+      const suggestions = suggestTaskWeights(
+        validation.remainingWeight, numberOfTasks, taskPriorities
+      );
       socket.emit('task_weight_suggestions', {
         projectId, remainingWeight: validation.remainingWeight, numberOfTasks, suggestions,
       });
@@ -1454,7 +1659,6 @@ socket.on('delete_task', async ({ taskId, userId }) => {
   async function isOwnerOrAdmin(profile, userId) {
     if (!profile) return false;
     if (profile.ownerId.toString() === userId.toString()) return true;
-    // ✅ profile.members is a Mongoose Map — must use .get(), not bracket notation
     const member = profile.members instanceof Map
       ? profile.members.get(userId.toString())
       : (profile.members || {})[userId.toString()];
@@ -1464,33 +1668,33 @@ socket.on('delete_task', async ({ taskId, userId }) => {
   function formatEmbeddedLocation(loc) {
     if (!loc || loc.coordinates?.latitude == null) return null;
     return {
-      id: loc.id || '',
-      _id: null,
+      id:          loc.id || '',
+      _id:         null,
       coordinates: {
-        latitude: loc.coordinates.latitude,
+        latitude:  loc.coordinates.latitude,
         longitude: loc.coordinates.longitude,
-        accuracy: loc.coordinates.accuracy ?? null,
-        altitude: loc.coordinates.altitude ?? null,
+        accuracy:  loc.coordinates.accuracy  ?? null,
+        altitude:  loc.coordinates.altitude  ?? null,
       },
-      displayName: loc.displayName || '',
-      country: loc.country || '',
-      countryCode: loc.countryCode || '',
-      region: loc.region ?? null,
-      city: loc.city ?? null,
-      district: loc.district ?? null,
-      ward: loc.ward ?? null,
-      street: loc.street ?? null,
-      postalCode: loc.postalCode ?? null,
-      landmark: loc.landmark ?? null,
+      displayName:  loc.displayName  || '',
+      country:      loc.country      || '',
+      countryCode:  loc.countryCode  || '',
+      region:       loc.region       ?? null,
+      city:         loc.city         ?? null,
+      district:     loc.district     ?? null,
+      ward:         loc.ward         ?? null,
+      street:       loc.street       ?? null,
+      postalCode:   loc.postalCode   ?? null,
+      landmark:     loc.landmark     ?? null,
       buildingName: loc.buildingName ?? null,
-      floor: loc.floor ?? null,
-      roomNumber: loc.roomNumber ?? null,
-      type: loc.type || 'custom',
-      marketName: loc.marketName ?? null,
-      isVerified: loc.isVerified ?? false,
-      isPrimary: loc.isPrimary ?? false,
-      isActive: loc.isActive ?? true,
-      createdAt: loc.createdAt instanceof Date
+      floor:        loc.floor        ?? null,
+      roomNumber:   loc.roomNumber   ?? null,
+      type:         loc.type         || 'custom',
+      marketName:   loc.marketName   ?? null,
+      isVerified:   loc.isVerified   ?? false,
+      isPrimary:    loc.isPrimary    ?? false,
+      isActive:     loc.isActive     ?? true,
+      createdAt:    loc.createdAt instanceof Date
         ? loc.createdAt.toISOString()
         : (loc.createdAt ?? new Date().toISOString()),
       updatedAt: loc.updatedAt instanceof Date
@@ -1500,45 +1704,57 @@ socket.on('delete_task', async ({ taskId, userId }) => {
     };
   }
 
+  // ✅ NEW: formats a single TaskplaceAssignment for the wire
+  function formatTaskplaceAssignment(a) {
+    if (!a) return null;
+    return {
+      id:                         a.id || '',
+      location:                   formatEmbeddedLocation(a.location),
+      radius:                     a.radius ?? 0.5,
+      requireLocationVerification: a.requireLocationVerification ?? false,
+      label:                      a.label ?? null,
+      assigneeIds:                (a.assigneeIds || []).map(id => id.toString()),
+    };
+  }
+
   function formatProject(project) {
     return {
-      _id: project._id.toString(),
-      id: project._id.toString(),
-      name: project.name,
-      description: project.description,
+      _id:               project._id.toString(),
+      id:                project._id.toString(),
+      name:              project.name,
+      description:       project.description,
       businessProfileId: project.businessProfileId.toString(),
-      createdBy: project.createdBy._id?.toString() || project.createdBy.toString(),
-      projectLead: project.projectLead.toString(),
-      status: project.status,
-      priority: project.priority,
-      startDate: project.startDate,
-      endDate: project.endDate,
-      goalDescription: project.goalDescription,
-      goalTargetValue: project.goalTargetValue,
-      goalUnit: project.goalUnit,
-      memberIds: project.memberIds.map(id => id.toString()),
-      totalTasks: project.totalTasks,
-      completedTasks: project.completedTasks,
-      progressPercentage: project.progressPercentage,
-      totalTaskWeight: project.totalTaskWeight,
+      createdBy:         project.createdBy._id?.toString() || project.createdBy.toString(),
+      projectLead:       project.projectLead.toString(),
+      status:            project.status,
+      priority:          project.priority,
+      startDate:         project.startDate,
+      endDate:           project.endDate,
+      goalDescription:   project.goalDescription,
+      goalTargetValue:   project.goalTargetValue,
+      goalUnit:          project.goalUnit,
+      memberIds:         project.memberIds.map(id => id.toString()),
+      totalTasks:        project.totalTasks,
+      completedTasks:    project.completedTasks,
+      progressPercentage:  project.progressPercentage,
+      totalTaskWeight:     project.totalTaskWeight,
       completedTaskWeight: project.completedTaskWeight,
-      createdAt: project.createdAt,
-      updatedAt: project.updatedAt,
+      createdAt:         project.createdAt,
+      updatedAt:         project.updatedAt,
     };
   }
 
   function formatTask(task) {
-    let assignedToIds = [];
+    let assignedToIds  = [];
     let assigneeDetails = [];
 
-    const rawAssignedTo = task.assignedTo || [];
-    for (const a of rawAssignedTo) {
+    for (const a of (task.assignedTo || [])) {
       if (a && typeof a === 'object' && a._id) {
         assignedToIds.push(a._id.toString());
         assigneeDetails.push({
-          _id: a._id.toString(),
-          name: a.name || '',
-          email: a.email || '',
+          _id:            a._id.toString(),
+          name:           a.name           || '',
+          email:          a.email          || '',
           profilePicture: a.profilePicture || null,
         });
       } else if (a) {
@@ -1547,102 +1763,126 @@ socket.on('delete_task', async ({ taskId, userId }) => {
     }
 
     return {
-      _id: task._id.toString(),
-      id: task._id.toString(),
-      projectId: task.projectId.toString(),
+      _id:               task._id.toString(),
+      id:                task._id.toString(),
+      projectId:         task.projectId.toString(),
       businessProfileId: task.businessProfileId.toString(),
-      title: task.title,
-      description: task.description ?? null,
-      status: task.status,
-      priority: task.priority,
-      weightPercentage: task.weightPercentage || 0,
-      allocatedTimeHours: task.allocatedTimeHours ?? null,
-      assignedTo: assignedToIds,
-      assignees: assigneeDetails,
-      createdBy: task.createdBy?._id?.toString() || task.createdBy?.toString() || null,
-      reviewedBy: task.reviewedBy?._id?.toString() || task.reviewedBy?.toString() || null,
-      taskplaceLocation: formatEmbeddedLocation(task.taskplaceLocation),
-      taskplaceRadius: task.taskplaceRadius ?? null,
+      title:             task.title,
+      description:       task.description       ?? null,
+      status:            task.status,
+      priority:          task.priority,
+      weightPercentage:  task.weightPercentage  || 0,
+      allocatedTimeHours:task.allocatedTimeHours ?? null,
+      assignedTo:        assignedToIds,
+      assignees:         assigneeDetails,
+      createdBy:         task.createdBy?._id?.toString() || task.createdBy?.toString() || null,
+      reviewedBy:        task.reviewedBy?._id?.toString() || task.reviewedBy?.toString() || null,
+
+      // ── Taskplace ───────────────────────────────────────────────────────
+      taskplaceLocation:           formatEmbeddedLocation(task.taskplaceLocation),
+      taskplaceRadius:             task.taskplaceRadius             ?? null,
       requireLocationVerification: task.requireLocationVerification ?? false,
-      actualStartTime: task.actualStartTime ?? null,
-      actualEndTime: task.actualEndTime ?? null,
+      // ✅ NEW: multi-location assignments
+      taskplaceAssignments: (task.taskplaceAssignments || [])
+        .map(formatTaskplaceAssignment)
+        .filter(Boolean),
+
+      // ── Sessions ────────────────────────────────────────────────────────
       activeSessions: (task.activeSessions || []).map(s => ({
-  userId:               s.userId?.toString(),
-  startTime:            s.startTime,
-  workLocation:         s.workLocation ?? null,
-  isAtTaskplace:        s.isAtTaskplace ?? null,
-  distanceFromTaskplace:s.distanceFromTaskplace ?? null,
-})),
-completedSessions: (task.completedSessions || []).map(s => ({
-  userId:               s.userId?.toString(),
-  startTime:            s.startTime,
-  endTime:              s.endTime,
-  timeSpentHours:       s.timeSpentHours,
-  isWithinAllocatedTime:s.isWithinAllocatedTime,
-  timeOverrun:          s.timeOverrun,
-})),
-      actualStartTime:  task.actualStartTime  ?? null,
-actualEndTime:    task.actualEndTime    ?? null,
-checkedInBy:      task.checkedInBy?.toString() ?? null,
-      actualTimeSpent: task.actualTimeSpent ?? null,
+        userId:               s.userId?.toString(),
+        startTime:            s.startTime,
+        workLocation:         s.workLocation        ?? null,
+        isAtTaskplace:        s.isAtTaskplace        ?? null,
+        distanceFromTaskplace:s.distanceFromTaskplace ?? null,
+      })),
+      completedSessions: (task.completedSessions || []).map(s => ({
+        userId:               s.userId?.toString(),
+        startTime:            s.startTime,
+        endTime:              s.endTime,
+        timeSpentHours:       s.timeSpentHours,
+        isWithinAllocatedTime:s.isWithinAllocatedTime,
+        timeOverrun:          s.timeOverrun,
+      })),
+
+      // ── Legacy execution fields ─────────────────────────────────────────
+      actualStartTime:       task.actualStartTime       ?? null,
+      actualEndTime:         task.actualEndTime         ?? null,
+      actualTimeSpent:       task.actualTimeSpent       ?? null,
       isWithinAllocatedTime: task.isWithinAllocatedTime ?? null,
-      timeOverrun: task.timeOverrun ?? null,
-      workLocation: formatEmbeddedLocation(task.workLocation),
-      isAtTaskplace: task.isAtTaskplace ?? null,
+      timeOverrun:           task.timeOverrun           ?? null,
+      workLocation:          formatEmbeddedLocation(task.workLocation),
+      isAtTaskplace:         task.isAtTaskplace         ?? null,
       distanceFromTaskplace: task.distanceFromTaskplace ?? null,
-      startDate: task.startDate ?? null,
-      dueDate: task.dueDate ?? null,
-      completedAt: task.completedAt ?? null,
+
+      // ── Scheduling ──────────────────────────────────────────────────────
+      startDate:      task.startDate   ?? null,
+      dueDate:        task.dueDate     ?? null,
+      completedAt:    task.completedAt ?? null,
       estimatedHours: task.estimatedHours ?? null,
-      actualHours: task.actualHours ?? null,
-      progressPercentage: task.progressPercentage || 0,
-      progressNotes: task.progressNotes ?? null,
+      actualHours:    task.actualHours    ?? null,
+
+      // ── Progress ────────────────────────────────────────────────────────
+      progressPercentage:  task.progressPercentage || 0,
+      progressNotes:       task.progressNotes      ?? null,
       completedMilestones: task.completedMilestones || 0,
-      commentCount: task.commentCount || 0,
-      tags: task.tags || [],
-      metadata: task.metadata || null,
-      createdAt: task.createdAt,
-      updatedAt: task.updatedAt,
+      commentCount:        task.commentCount        || 0,
+      tags:                task.tags                || [],
+      metadata:            task.metadata            || null,
+      createdAt:           task.createdAt,
+      updatedAt:           task.updatedAt,
     };
   }
 
   function calculateDistance(lat1, lon1, lat2, lon2) {
-    const R = 6371;
+    const R    = 6371;
     const dLat = (lat2 - lat1) * Math.PI / 180;
     const dLon = (lon2 - lon1) * Math.PI / 180;
-    const a =
-      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-      Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const a    =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos(lat1 * Math.PI / 180) *
+      Math.cos(lat2 * Math.PI / 180) *
+      Math.sin(dLon / 2) ** 2;
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   }
 
   function formatMilestone(milestone) {
     return {
       _id: milestone._id.toString(), id: milestone._id.toString(),
-      taskId: milestone.taskId.toString(), title: milestone.title,
-      description: milestone.description, type: milestone.type,
-      isCompleted: milestone.isCompleted, completedAt: milestone.completedAt,
+      taskId:      milestone.taskId.toString(),
+      title:       milestone.title,
+      description: milestone.description,
+      type:        milestone.type,
+      isCompleted: milestone.isCompleted,
+      completedAt: milestone.completedAt,
       completedBy: milestone.completedBy?.toString(),
-      targetValue: milestone.targetValue, currentValue: milestone.currentValue,
-      unit: milestone.unit, requiresVerification: milestone.requiresVerification,
-      verifiedBy: milestone.verifiedBy?.toString(), verifiedAt: milestone.verifiedAt,
-      proofUrls: milestone.proofUrls, createdAt: milestone.createdAt, updatedAt: milestone.updatedAt,
+      targetValue: milestone.targetValue,
+      currentValue:milestone.currentValue,
+      unit:        milestone.unit,
+      requiresVerification: milestone.requiresVerification,
+      verifiedBy:  milestone.verifiedBy?.toString(),
+      verifiedAt:  milestone.verifiedAt,
+      proofUrls:   milestone.proofUrls,
+      createdAt:   milestone.createdAt,
+      updatedAt:   milestone.updatedAt,
     };
   }
 
   function formatComment(comment) {
     return {
       _id: comment._id.toString(), id: comment._id.toString(),
-      taskId: comment.taskId.toString(), projectId: comment.projectId.toString(),
+      taskId:            comment.taskId.toString(),
+      projectId:         comment.projectId.toString(),
       businessProfileId: comment.businessProfileId.toString(),
-      userId: comment.userId._id?.toString() || comment.userId.toString(),
-      content: comment.content, type: comment.type,
-      mentionedUserIds: comment.mentionedUserIds?.map(id => id.toString()) || [],
-      createdAt: comment.createdAt,
+      userId:            comment.userId._id?.toString() || comment.userId.toString(),
+      content:           comment.content,
+      type:              comment.type,
+      mentionedUserIds:  comment.mentionedUserIds?.map(id => id.toString()) || [],
+      createdAt:         comment.createdAt,
       user: comment.userId.name ? {
-        _id: comment.userId._id.toString(), name: comment.userId.name,
-        email: comment.userId.email, profilePicture: comment.userId.profilePicture,
+        _id:            comment.userId._id.toString(),
+        name:           comment.userId.name,
+        email:          comment.userId.email,
+        profilePicture: comment.userId.profilePicture,
       } : null,
     };
   }
@@ -1650,20 +1890,23 @@ checkedInBy:      task.checkedInBy?.toString() ?? null,
   function formatInvitation(invitation) {
     return {
       _id: invitation._id.toString(), id: invitation._id.toString(),
-      projectId: invitation.projectId.toString(),
+      projectId:         invitation.projectId.toString(),
       businessProfileId: invitation.businessProfileId.toString(),
-      inviterId: invitation.inviterId._id?.toString() || invitation.inviterId.toString(),
-      inviteeId: invitation.inviteeId.toString(),
-      inviteeEmail: invitation.inviteeEmail, projectName: invitation.projectName,
-      status: invitation.status, createdAt: invitation.createdAt, respondedAt: invitation.respondedAt,
+      inviterId:         invitation.inviterId._id?.toString() || invitation.inviterId.toString(),
+      inviteeId:         invitation.inviteeId.toString(),
+      inviteeEmail:      invitation.inviteeEmail,
+      projectName:       invitation.projectName,
+      status:            invitation.status,
+      createdAt:         invitation.createdAt,
+      respondedAt:       invitation.respondedAt,
       inviter: invitation.inviterId.name ? {
-        _id: invitation.inviterId._id.toString(),
-        name: invitation.inviterId.name, email: invitation.inviterId.email,
+        _id:   invitation.inviterId._id.toString(),
+        name:  invitation.inviterId.name,
+        email: invitation.inviterId.email,
       } : null,
     };
   }
 
-  // ✅ FIX: use getMemberIds() or iterate Map correctly — Object.keys() breaks on Mongoose Maps
   async function broadcastToProfile(io, userSockets, businessProfileId, event, data) {
     const profile = await BusinessProfile.findById(businessProfileId);
     if (!profile) return;
