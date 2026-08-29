@@ -45,14 +45,16 @@ const PackageSchema = new mongoose.Schema({
     type: String,
     default: null
   },
-  
+
   // Package Type
+  // member_tier  — standard tiers priced by member count (public)
+  // reseller     — agency/reseller accounts managing multiple client profiles (internal)
   packageType: {
     type: String,
-    enum: ['accounting', 'task_management', 'bundle'],
+    enum: ['member_tier', 'reseller'],
     required: true
   },
-  
+
   // Pricing
   price: {
     amount: {
@@ -69,22 +71,26 @@ const PackageSchema = new mongoose.Schema({
       enum: ['monthly', 'annual'],
       default: 'monthly'
     },
-    // Extra user pricing: base package includes up to limits.maxUsers employees.
-    // Each additional user above that limit is charged extraUserRate per month.
+    // Extra user pricing above limits.maxUsers
     extraUserRate: {
       type: Number,
-      default: 0,   // 0 means no extra charge
+      default: 0,
       min: 0
     },
     extraUserRateCurrency: {
       type: String,
       default: 'TZS'
+    },
+    // true = price is negotiated per contract; amount field is 0 and not shown publicly
+    isNegotiated: {
+      type: Boolean,
+      default: false
     }
   },
-  
+
   // Features included in this package
   features: [PackageFeatureSchema],
-  
+
   // Package metadata
   isActive: {
     type: Boolean,
@@ -94,17 +100,22 @@ const PackageSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+  // false = hidden from public pricing page (admin/sales use only)
+  isPublic: {
+    type: Boolean,
+    default: true
+  },
   priority: {
     type: Number,
     default: 0
   },
-  
+
   // Target audience
   targetCustomers: [{
     type: String,
-    enum: ['sole_trader', 'small_business', 'manufacturer', 'service_provider', 'all']
+    enum: ['sole_trader', 'small_business', 'manufacturer', 'service_provider', 'agency', 'reseller', 'all']
   }],
-  
+
   // Marketing
   marketingTagline: {
     type: String,
@@ -122,12 +133,21 @@ const PackageSchema = new mongoose.Schema({
     type: String,
     default: '#1F4788'
   },
-  
-  // Limits (if any)
+
+  // Limits
   limits: {
+    // Member range for this tier
+    minUsers: {
+      type: Number,
+      default: null   // null = no minimum enforced
+    },
     maxUsers: {
       type: Number,
-      default: null // null means unlimited; set to 10 for base plans
+      default: null   // null = unlimited
+    },
+    maxClients: {
+      type: Number,
+      default: null   // null = unlimited (used by reseller tier)
     },
     maxTransactions: {
       type: Number,
@@ -139,10 +159,10 @@ const PackageSchema = new mongoose.Schema({
     },
     maxStorage: {
       type: Number,
-      default: null // in MB
+      default: null   // in MB
     }
   },
-  
+
   // Metadata
   metadata: {
     type: Map,
@@ -153,7 +173,7 @@ const PackageSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// ✅ User Package Subscription Schema (tracks which packages a user has)
+// ✅ User Package Subscription Schema
 const UserPackageSubscriptionSchema = new mongoose.Schema({
   userId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -165,14 +185,14 @@ const UserPackageSubscriptionSchema = new mongoose.Schema({
     ref: 'Package',
     required: true
   },
-  
+
   // Subscription details
   status: {
     type: String,
     enum: ['active', 'expired', 'cancelled', 'pending', 'trial'],
     default: 'pending'
   },
-  
+
   // Dates
   startDate: {
     type: Date,
@@ -186,7 +206,7 @@ const UserPackageSubscriptionSchema = new mongoose.Schema({
     type: Date,
     default: null
   },
-  
+
   // Trial information
   isTrial: {
     type: Boolean,
@@ -196,7 +216,7 @@ const UserPackageSubscriptionSchema = new mongoose.Schema({
     type: Date,
     default: null
   },
-  
+
   // Payment tracking
   lastPaymentDate: {
     type: Date,
@@ -217,13 +237,13 @@ const UserPackageSubscriptionSchema = new mongoose.Schema({
     default: 0,
     min: 0
   },
-  
+
   // Auto-renewal
   autoRenew: {
     type: Boolean,
     default: true
   },
-  
+
   // Agent tracking (for commission)
   acquiredBy: {
     agentId: {
@@ -237,14 +257,14 @@ const UserPackageSubscriptionSchema = new mongoose.Schema({
     },
     commissionRate: {
       type: Number,
-      default: 0.30 // 30%
+      default: 0.30   // 30%
     },
     totalCommissionPaid: {
       type: Number,
       default: 0
     }
   },
-  
+
   // Usage statistics
   stats: {
     totalLogins: {
@@ -261,7 +281,7 @@ const UserPackageSubscriptionSchema = new mongoose.Schema({
       lastUsed: Date
     }]
   },
-  
+
   // Metadata
   metadata: {
     type: Map,
@@ -276,6 +296,7 @@ const UserPackageSubscriptionSchema = new mongoose.Schema({
 PackageSchema.index({ packageType: 1, isActive: 1 });
 PackageSchema.index({ name: 1 }, { unique: true });
 PackageSchema.index({ isActive: 1, priority: -1 });
+PackageSchema.index({ isPublic: 1, isActive: 1 });
 
 // ✅ Indexes for UserPackageSubscription
 UserPackageSubscriptionSchema.index({ userId: 1, status: 1 });
@@ -304,8 +325,8 @@ PackageSchema.methods.getAnnualPrice = function() {
 
 /**
  * Calculate total monthly charge for a subscription, factoring in extra users.
- * @param {number} totalUsers - total number of users/employees on the subscription
- * @returns {number} total amount due for the month in the package's currency
+ * @param {number} totalUsers - total number of users on the subscription
+ * @returns {number} total amount due for the month
  */
 PackageSchema.methods.calculateMonthlyCharge = function(totalUsers = 0) {
   const base = this.getMonthlyPrice();
@@ -313,6 +334,30 @@ PackageSchema.methods.calculateMonthlyCharge = function(totalUsers = 0) {
   const extraUsers = Math.max(0, totalUsers - includedUsers);
   const extraCharge = extraUsers * (this.price.extraUserRate ?? 0);
   return base + extraCharge;
+};
+
+/**
+ * Check whether a given member count falls within this tier's range.
+ * @param {number} memberCount
+ * @returns {boolean}
+ */
+PackageSchema.methods.isWithinMemberRange = function(memberCount) {
+  const min = this.limits.minUsers ?? 0;
+  const max = this.limits.maxUsers ?? Infinity;
+  return memberCount >= min && memberCount <= max;
+};
+
+/**
+ * Find the correct member_tier package for a given member count.
+ * Usage: await Package.getTierForMemberCount(12)
+ */
+PackageSchema.statics.getTierForMemberCount = async function(memberCount) {
+  const tiers = await this.find({
+    packageType: 'member_tier',
+    isActive: true
+  }).sort({ 'limits.minUsers': 1 });
+
+  return tiers.find(tier => tier.isWithinMemberRange(memberCount)) ?? null;
 };
 
 // ✅ UserPackageSubscription Methods
@@ -328,14 +373,12 @@ UserPackageSubscriptionSchema.methods.isExpired = function() {
 UserPackageSubscriptionSchema.methods.getRemainingDays = function() {
   const now = new Date();
   const timeDiff = this.expiryDate.getTime() - now.getTime();
-  const daysDiff = Math.ceil(timeDiff / (1000 * 3600 * 24));
-  return Math.max(0, daysDiff);
+  return Math.max(0, Math.ceil(timeDiff / (1000 * 3600 * 24)));
 };
 
 /**
- * Calculate the current monthly charge for this subscription,
- * including any extra-user surcharge above the package's maxUsers limit.
- * Requires the subscription to have its packageId populated.
+ * Calculate the current monthly charge for this subscription.
+ * Requires packageId to be populated.
  */
 UserPackageSubscriptionSchema.methods.getCurrentMonthlyCharge = function() {
   if (!this.packageId || typeof this.packageId.calculateMonthlyCharge !== 'function') {
@@ -349,19 +392,18 @@ UserPackageSubscriptionSchema.methods.getCurrentMonthlyCharge = function() {
 UserPackageSubscriptionSchema.methods.renew = async function(durationInMonths = 1, paymentAmount = 0) {
   const newExpiryDate = new Date(this.expiryDate);
   newExpiryDate.setMonth(newExpiryDate.getMonth() + durationInMonths);
-  
+
   this.expiryDate = newExpiryDate;
   this.status = 'active';
   this.lastPaymentDate = new Date();
   this.lastPaymentAmount = paymentAmount;
   this.totalPaid += paymentAmount;
-  
-  // Calculate agent commission
+
   if (this.acquiredBy.agentId) {
     const commission = paymentAmount * this.acquiredBy.commissionRate;
     this.acquiredBy.totalCommissionPaid += commission;
   }
-  
+
   await this.save();
   return this;
 };
@@ -375,19 +417,13 @@ UserPackageSubscriptionSchema.methods.cancel = async function() {
 };
 
 UserPackageSubscriptionSchema.methods.recordFeatureUsage = async function(featureId) {
-  const existingFeature = this.stats.featuresUsed.find(f => f.featureId === featureId);
-  
-  if (existingFeature) {
-    existingFeature.usageCount += 1;
-    existingFeature.lastUsed = new Date();
+  const existing = this.stats.featuresUsed.find(f => f.featureId === featureId);
+  if (existing) {
+    existing.usageCount += 1;
+    existing.lastUsed = new Date();
   } else {
-    this.stats.featuresUsed.push({
-      featureId,
-      usageCount: 1,
-      lastUsed: new Date()
-    });
+    this.stats.featuresUsed.push({ featureId, usageCount: 1, lastUsed: new Date() });
   }
-  
   this.stats.lastUsedAt = new Date();
   await this.save();
   return this;
@@ -402,18 +438,12 @@ UserPackageSubscriptionSchema.methods.recordLogin = async function() {
 
 UserPackageSubscriptionSchema.statics.getActivePackages = async function(userId) {
   const now = new Date();
-  
-  // Auto-expire any subscriptions that have passed their expiryDate
+
   await this.updateMany(
-    {
-      userId,
-      status: { $in: ['active', 'trial'] },
-      expiryDate: { $lte: now },
-    },
+    { userId, status: { $in: ['active', 'trial'] }, expiryDate: { $lte: now } },
     { $set: { status: 'expired' } }
   );
 
-  // Now return only genuinely active ones
   return this.find({
     userId,
     status: { $in: ['active', 'trial'] },
@@ -421,35 +451,34 @@ UserPackageSubscriptionSchema.statics.getActivePackages = async function(userId)
   }).populate('packageId');
 };
 
-// ✅ Static method to check if user has a specific package
-UserPackageSubscriptionSchema.statics.hasPackage = async function(userId, packageType) {
-  const subscription = await this.findOne({
+/**
+ * Check if a user has an active member_tier subscription.
+ * (Replaces the old bundle/accounting/task_management check.)
+ */
+UserPackageSubscriptionSchema.statics.hasActiveTier = async function(userId) {
+  const sub = await this.findOne({
     userId,
     status: { $in: ['active', 'trial'] },
     expiryDate: { $gt: new Date() }
   }).populate('packageId');
-  
-  if (!subscription) return false;
-  
-  return subscription.packageId.packageType === packageType || 
-         subscription.packageId.packageType === 'bundle';
+
+  if (!sub) return false;
+  return sub.packageId.packageType === 'member_tier';
 };
 
-// ✅ Static method to calculate total monthly revenue (now accounts for extra users)
+// ✅ Static method to calculate total monthly revenue
 UserPackageSubscriptionSchema.statics.calculateMonthlyRevenue = async function() {
   const activeSubscriptions = await this.find({
     status: 'active',
     expiryDate: { $gt: new Date() }
   }).populate('packageId');
-  
+
   let totalRevenue = 0;
-  
   for (const sub of activeSubscriptions) {
     if (sub.packageId) {
       totalRevenue += sub.getCurrentMonthlyCharge();
     }
   }
-  
   return totalRevenue;
 };
 
@@ -460,54 +489,48 @@ UserPackageSubscriptionSchema.statics.calculateAgentCommissions = async function
     status: 'active',
     lastPaymentDate: { $gte: startDate, $lte: endDate }
   });
-  
+
   let totalCommission = 0;
-  
   for (const sub of subscriptions) {
     totalCommission += sub.lastPaymentAmount * sub.acquiredBy.commissionRate;
   }
-  
   return totalCommission;
 };
 
+// ✅ Pre-save hook
 UserPackageSubscriptionSchema.pre('save', function(next) {
   const now = new Date();
-  
-  // Auto-expire if past expiry date
+
   if ((this.status === 'active' || this.status === 'trial') && this.expiryDate <= now) {
     this.status = 'expired';
   }
-  
-  // Set trial end date if trial
+
   if (this.isTrial && !this.trialEndDate) {
     this.trialEndDate = new Date(this.startDate);
     this.trialEndDate.setDate(this.trialEndDate.getDate() + 7);
   }
-  
+
   next();
 });
 
-// ✅ toJSON for clean API responses
+// ✅ toJSON — clean API responses
 PackageSchema.methods.toJSON = function() {
-  const packageObject = this.toObject();
-  packageObject.id = packageObject._id;
-  delete packageObject._id;
-  delete packageObject.__v;
-  return packageObject;
+  const obj = this.toObject();
+  obj.id = obj._id;
+  delete obj._id;
+  delete obj.__v;
+  return obj;
 };
 
 UserPackageSubscriptionSchema.methods.toJSON = function() {
-  const subObject = this.toObject();
-  subObject.id = subObject._id;
-  delete subObject._id;
-  delete subObject.__v;
-  
-  // Add computed fields
-  subObject.isActive = this.isActive();
-  subObject.isExpired = this.isExpired();
-  subObject.remainingDays = this.getRemainingDays();
-  
-  return subObject;
+  const obj = this.toObject();
+  obj.id = obj._id;
+  delete obj._id;
+  delete obj.__v;
+  obj.isActive = this.isActive();
+  obj.isExpired = this.isExpired();
+  obj.remainingDays = this.getRemainingDays();
+  return obj;
 };
 
 const Package = mongoose.model("Package", PackageSchema);

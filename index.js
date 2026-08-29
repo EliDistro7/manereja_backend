@@ -23,6 +23,7 @@ const profileRoutes = require("./routes/manereja/profile-routes");
 const salesItemRoutes= require('./routes/manereja/salesItem-routes.js');
 const TanzaniaSeed = require('./seeds/locations/Tanzania.js');
 const PackagesSeed = require('./models/manereja/seed_package.js');
+const { migrateSubscriptions } = require('./models/manereja/migrate_subscriptions');
 const locationRoutes = require('./routes/manereja/location-routes.js');
 const attendanceRoutes = require('./routes/manereja/attendance-routes.js');
 const projectRoutes = require('./routes/manereja/project-routes.js');
@@ -112,12 +113,13 @@ mongoose.connect(process.env.MONGO_URL, {
     connectTimeoutMS: 40000,
     socketTimeoutMS: 45000,
 })
-.then(() => {
+.then(async () => {
     console.log("Connected to MongoDB");
-   //
-   // TanzaniaSeed.seedTanzaniaLocations();
-   // PackagesSeed.seedPackages();
-    //seedAdmin()
+
+    await PackagesSeed.seedPackages();    // ← must finish first
+    await migrateSubscriptions();         // ← runs after seed, safe to remove once all users migrated
+
+    
 
         const io = initSocket(server);
     app.set('io', io);
