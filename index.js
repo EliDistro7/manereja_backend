@@ -116,8 +116,8 @@ mongoose.connect(process.env.MONGO_URL, {
 .then(async () => {
     console.log("Connected to MongoDB");
 
-    await PackagesSeed.seedPackages();    // ← must finish first
-    await migrateSubscriptions();         // ← runs after seed, safe to remove once all users migrated
+ //   await PackagesSeed.seedPackages();    // ← must finish first
+  //  await migrateSubscriptions();         // ← runs after seed, safe to remove once all users migrated
 
     
 

@@ -156,5 +156,5 @@ module.exports = {
   screensForPackage,
   screensForPackages,
   requiredPackageForScreen,
-  annotatePermissionsWithAccess,
+  annotatePermissionsWithAccess
 };
