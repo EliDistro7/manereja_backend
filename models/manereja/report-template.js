@@ -3,6 +3,15 @@
 // Added: alarms[] sub-document — admin-defined alarm configurations that
 // are auto-provisioned on employee devices when they load tasks with
 // pending reports for this template.
+//
+// Added: 'coordinates' column type — stores a lat/lng + address string
+// (JSON-encoded) picked via MapPickerScreen on the Flutter client.
+//
+// Added: points scoring system — each column can carry an optional flat
+// point value (points) and, for dropdown fields, a per-option point map
+// (dropdownOptionPoints). The Flutter client scores rows locally using
+// ReportTemplate.scoreRow(); the server stores the config and round-trips
+// it without modification.
 
 const mongoose = require('mongoose');
 
@@ -13,8 +22,11 @@ const reportTemplateColumnSchema = new mongoose.Schema({
   label: { type: String, required: true, trim: true },
   type: {
     type: String,
-    enum: ['text', 'number', 'date', 'time', 'dropdown',
-           'checkbox', 'currency', 'percentage'],
+    enum: [
+      'text', 'number', 'date', 'time', 'dropdown',
+      'checkbox', 'currency', 'percentage',
+      'coordinates',  // lat/lng + address — picked via MapPickerScreen
+    ],
     required: true,
   },
   required:        { type: Boolean, default: false },
@@ -23,48 +35,57 @@ const reportTemplateColumnSchema = new mongoose.Schema({
   maxValue:        { type: Number },
   placeholder:     { type: String },
   defaultValue:    { type: String },
+
+  // ── Points scoring ──────────────────────────────────────────────────────────
+  //
+  // points
+  //   The base point value for this field.
+  //   • Non-dropdown fields: awarded when the field is filled in (non-empty).
+  //   • Dropdown fields: used as a fallback when the selected option is not
+  //     present in dropdownOptionPoints.
+  //   • null/omitted → field is unscored (contributes 0 pts).
+  //
+  // dropdownOptionPoints
+  //   Only meaningful for type === 'dropdown'.
+  //   A key-value map of { optionLabel: pointsInt } that overrides the flat
+  //   'points' value for each specific option.
+  //
+  //   Example:
+  //     dropdownOptions:      ["Employee", "Manager"]
+  //     dropdownOptionPoints: { "Employee": 1, "Manager": 3 }
+  //     points: 1   ← fallback for any option not listed above
+
+  points: {
+    type:    Number,
+    min:     0,
+    default: null,   // null = unscored
+  },
+
+  dropdownOptionPoints: {
+    type:    Map,
+    of:      Number,
+    default: undefined,   // absent unless the column is a scored dropdown
+  },
+
 }, { _id: false });
 
 // ─── Alarm sub-schema ─────────────────────────────────────────────────────────
-//
-// Each entry = one alarm the admin wants auto-provisioned on every employee
-// device that has a pending report for this template.
-//
-// Fields mirror AlarmModel (Flutter) so the client constructs it directly:
-//
-//   alarmDefinitionId  — stable UUID (server-generated on creation)
-//   title              — shown on ring screen (defaults to template name)
-//   body               — subtitle / description
-//   deliveryMode       — 'notification' | 'alarm'
-//   repeat             — 'once' | 'daily' | 'weekly' | 'hourly' | 'custom'
-//   customIntervalMinutes — only when repeat == 'custom'
-//   scheduledTime      — HH:MM 24h — Flutter combines with today's date
-//   isActive           — admin can soft-disable without deleting
-//   soundAsset         — optional asset path; null = platform default
 
 const templateAlarmSchema = new mongoose.Schema({
   alarmDefinitionId: { type: String, required: true },
-
-  title: { type: String, trim: true },  // falls back to template.name on client
-
+  title: { type: String, trim: true },
   body: { type: String, trim: true, default: '' },
-
   deliveryMode: {
     type:    String,
     enum:    ['notification', 'alarm'],
     default: 'notification',
   },
-
   repeat: {
     type:    String,
     enum:    ['once', 'hourly', 'daily', 'weekly', 'custom'],
     default: 'daily',
   },
-
   customIntervalMinutes: { type: Number, min: 1 },
-
-  // Time-of-day to fire. Flutter converts to full DateTime using today's date
-  // (or next valid occurrence for weekly). Format: "HH:MM" 24-hour.
   scheduledTime: {
     type:     String,
     required: true,
@@ -73,14 +94,9 @@ const templateAlarmSchema = new mongoose.Schema({
       message:   'scheduledTime must be HH:MM 24-hour format',
     },
   },
-
-  // Admin can temporarily disable without deleting.
-  // Only isActive == true alarms are sent to employee devices.
-  isActive: { type: Boolean, default: true },
-
-  soundAsset: { type: String },  // null = platform default ringtone
-
-  createdAt: { type: Date, default: Date.now },
+  isActive:   { type: Boolean, default: true },
+  soundAsset: { type: String },
+  createdAt:  { type: Date, default: Date.now },
 }, { _id: false });
 
 // ─── Main template schema ─────────────────────────────────────────────────────
@@ -124,7 +140,6 @@ const reportTemplateSchema = new mongoose.Schema({
     },
   },
 
-  // ── Alarm definitions (max 5) ─────────────────────────────────────────────
   alarms: {
     type:    [templateAlarmSchema],
     default: [],

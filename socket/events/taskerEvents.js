@@ -24,24 +24,47 @@ function notDeleted() {
 
 module.exports = function taskerEvents(io, socket, userSockets, roomSocketsMap, socketToUser) {
 
-  function formatReportTemplate(template) {
-    return {
-      _id:                      template._id.toString(),
-      id:                       template._id.toString(),
-      projectId:                template.projectId.toString(),
-      businessProfileId:        template.businessProfileId.toString(),
-      createdBy:                template.createdBy.toString(),
-      name:                     template.name,
-      description:              template.description,
-      columns:                  template.columns,
-      requiresApproval:         template.requiresApproval,
-      allowMultipleSubmissions: template.allowMultipleSubmissions,
-      submissionFrequency:      template.submissionFrequency,
-      reportingTime:            template.reportingTime,
-      createdAt:                template.createdAt,
-      updatedAt:                template.updatedAt,
-    };
-  }
+
+function formatReportTemplate(template) {
+  return {
+    _id:                      template._id.toString(),
+    id:                       template._id.toString(),
+    projectId:                template.projectId.toString(),
+    businessProfileId:        template.businessProfileId.toString(),
+    createdBy:                template.createdBy.toString(),
+    name:                     template.name,
+    description:              template.description,
+    columns: template.columns.map(col => {
+      // Mongoose Map → plain object (safe for JSON serialisation)
+      const optionPoints = col.dropdownOptionPoints instanceof Map
+        ? Object.fromEntries(col.dropdownOptionPoints)
+        : (col.dropdownOptionPoints ?? undefined);
+
+      return {
+        id:                   col.id,
+        label:                col.label,
+        type:                 col.type,
+        required:             col.required,
+        dropdownOptions:      col.dropdownOptions?.length ? col.dropdownOptions : undefined,
+        minValue:             col.minValue,
+        maxValue:             col.maxValue,
+        placeholder:          col.placeholder,
+        defaultValue:         col.defaultValue,
+        points:               col.points ?? null,
+        dropdownOptionPoints: optionPoints,
+      };
+    }),
+    requiresApproval:         template.requiresApproval,
+    allowMultipleSubmissions: template.allowMultipleSubmissions,
+    submissionFrequency:      template.submissionFrequency,
+    reportingTime:            template.reportingTime ?? '18:00',
+    isDeleted:                template.isDeleted ?? false,
+    alarms:                   template.alarms ?? [],
+    createdAt:                template.createdAt,
+    updatedAt:                template.updatedAt,
+  };
+}
+
 
   async function notifyAssigneeOfTaskTemplate(task, newAssigneeIds) {
     const templateId = task.metadata?.get?.('reportTemplateId')

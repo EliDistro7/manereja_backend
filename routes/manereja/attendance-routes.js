@@ -981,27 +981,32 @@ router.post('/check-in', authenticate, async (req, res) => {
     let isAtWorkplace = true;
     let distanceFromWorkplace = 0;
 
-    if (settings.requireLocationVerification && settings.workplaceLocation) {
-      distanceFromWorkplace = calculateDistance(
-        checkInLocation.coordinates.latitude,
-        checkInLocation.coordinates.longitude,
-        settings.workplaceLocation.coordinates.latitude,
-        settings.workplaceLocation.coordinates.longitude
-      );
 
-      isAtWorkplace = distanceFromWorkplace <= settings.allowedRadius;
+// AFTER — skip workplace fence when this is a taskplace check-in
+const isTaskplaceCheckIn = !!taskId;
 
-      if (!isAtWorkplace) {
-        console.log('❌ Too far from workplace');
-        return res.status(400).json({
-          message: `You are ${distanceFromWorkplace.toFixed(2)} km away from the workplace. You must be within ${settings.allowedRadius} km to check in.`,
-          distanceFromWorkplace: parseFloat(distanceFromWorkplace.toFixed(2)),
-          allowedRadius: settings.allowedRadius,
-          workplaceLocation: settings.workplaceLocation.displayName,
-          yourLocation: checkInLocation.displayName
-        });
-      }
-    }
+if (!isTaskplaceCheckIn && settings.requireLocationVerification && settings.workplaceLocation) {
+  distanceFromWorkplace = calculateDistance(
+    checkInLocation.coordinates.latitude,
+    checkInLocation.coordinates.longitude,
+    settings.workplaceLocation.coordinates.latitude,
+    settings.workplaceLocation.coordinates.longitude
+  );
+  isAtWorkplace = distanceFromWorkplace <= settings.allowedRadius;
+
+  if (!isAtWorkplace) {
+    return res.status(400).json({
+      message: `You are ${distanceFromWorkplace.toFixed(2)} km away from the workplace...`,
+      distanceFromWorkplace: parseFloat(distanceFromWorkplace.toFixed(2)),
+    });
+  }
+}
+
+// For taskplace check-ins, trust the client-verified values
+if (isTaskplaceCheckIn) {
+  isAtWorkplace = true; // doesn't apply — set neutral
+}
+    
 
     // Verify biometric if required and method is not manual
     let biometricVerified = false;

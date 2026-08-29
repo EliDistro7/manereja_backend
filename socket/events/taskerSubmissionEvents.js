@@ -353,12 +353,32 @@ function formatReportTemplate(template) {
     createdBy:                template.createdBy.toString(),
     name:                     template.name,
     description:              template.description,
-    columns:                  template.columns,
+    columns: template.columns.map(col => {
+      // Mongoose Map → plain object (safe for JSON serialisation)
+      const optionPoints = col.dropdownOptionPoints instanceof Map
+        ? Object.fromEntries(col.dropdownOptionPoints)
+        : (col.dropdownOptionPoints ?? undefined);
+
+      return {
+        id:                   col.id,
+        label:                col.label,
+        type:                 col.type,
+        required:             col.required,
+        dropdownOptions:      col.dropdownOptions?.length ? col.dropdownOptions : undefined,
+        minValue:             col.minValue,
+        maxValue:             col.maxValue,
+        placeholder:          col.placeholder,
+        defaultValue:         col.defaultValue,
+        points:               col.points ?? null,
+        dropdownOptionPoints: optionPoints,
+      };
+    }),
     requiresApproval:         template.requiresApproval,
     allowMultipleSubmissions: template.allowMultipleSubmissions,
     submissionFrequency:      template.submissionFrequency,
     reportingTime:            template.reportingTime ?? '18:00',
-    isDeleted:                template.isDeleted ?? false,   // ← add
+    isDeleted:                template.isDeleted ?? false,
+    alarms:                   template.alarms ?? [],
     createdAt:                template.createdAt,
     updatedAt:                template.updatedAt,
   };
