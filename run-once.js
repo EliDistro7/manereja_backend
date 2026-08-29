@@ -1,29 +1,34 @@
-// run-once.js (put this in your project root)
+/**
+ * fix-subscriber-packages.js
+ *
+ * Moves all subscriptions currently on the reseller package
+ * to the Business tier (largest). Status unchanged.
+ */
 
-require('dotenv').config(); // loads your .env
-const mongoose = require('mongoose');
+const { Package, UserPackageSubscription } = require('./models/manereja/package');
 
-async function main() {
-  await mongoose.connect(process.env.MONGO_URL || process.env.DATABASE_URL);
-  console.log('✅ Connected to MongoDB');
+async function fixSubscriberPackages() {
+  const [resellerPkg, businessPkg] = await Promise.all([
+    Package.findOne({ packageType: 'reseller' }),
+    Package.findOne({ name: 'business', packageType: 'member_tier' }),
+  ]);
 
-  const { 
-    migrateScreenPermissions, 
-    unlockAllScreenPermissions 
-  } = require('./utils/manereja/migrateScreenPermissions');
+  if (!resellerPkg) {
+    console.error('❌ Reseller package not found');
+    return;
+  }
+  if (!businessPkg) {
+    console.error('❌ Business tier not found — run seed first');
+    return;
+  }
 
-  // Step 1 — add missing screens
-  await migrateScreenPermissions();
+  const result = await UserPackageSubscription.updateMany(
+    { packageId: resellerPkg._id },
+    { $set: { packageId: businessPkg._id } }
+  );
 
-  // Step 2 — unlock all locked screens  
-  await unlockAllScreenPermissions();
-
-  await mongoose.disconnect();
-  console.log('✅ Done. You can delete this file now.');
-  process.exit(0);
+  console.log(`✅ Moved ${result.modifiedCount} subscription(s) → Business tier (TZS ${businessPkg.price.amount.toLocaleString()} / month)`);
+  console.log(`   All statuses preserved as-is.`);
 }
 
-main().catch(err => {
-  console.error('❌ Failed:', err);
-  process.exit(1);
-});
+module.exports = { fixSubscriberPackages };

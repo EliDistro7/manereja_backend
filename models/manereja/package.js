@@ -51,7 +51,7 @@ const PackageSchema = new mongoose.Schema({
   // reseller     — agency/reseller accounts managing multiple client profiles (internal)
   packageType: {
     type: String,
-    enum: ['member_tier', 'reseller'],
+    enum: ['bundle', 'accounting', 'task_management', 'reseller'],
     required: true
   },
 
@@ -347,13 +347,13 @@ PackageSchema.methods.isWithinMemberRange = function(memberCount) {
   return memberCount >= min && memberCount <= max;
 };
 
-/**
- * Find the correct member_tier package for a given member count.
- * Usage: await Package.getTierForMemberCount(12)
- */
+
+
+
+// ✅ getTierForMemberCount
 PackageSchema.statics.getTierForMemberCount = async function(memberCount) {
   const tiers = await this.find({
-    packageType: 'member_tier',
+    packageType: 'bundle',   // ← was 'member_tier'
     isActive: true
   }).sort({ 'limits.minUsers': 1 });
 
@@ -455,6 +455,7 @@ UserPackageSubscriptionSchema.statics.getActivePackages = async function(userId)
  * Check if a user has an active member_tier subscription.
  * (Replaces the old bundle/accounting/task_management check.)
  */
+// ✅ hasActiveTier
 UserPackageSubscriptionSchema.statics.hasActiveTier = async function(userId) {
   const sub = await this.findOne({
     userId,
@@ -463,7 +464,7 @@ UserPackageSubscriptionSchema.statics.hasActiveTier = async function(userId) {
   }).populate('packageId');
 
   if (!sub) return false;
-  return sub.packageId.packageType === 'member_tier';
+  return sub.packageId.packageType === 'bundle';  // ← was 'member_tier'
 };
 
 // ✅ Static method to calculate total monthly revenue
