@@ -37,7 +37,7 @@ const adminRoutes = require('./routes/manereja/admin-routes.js');
 const fcmTokenRoutes = require('./routes/manereja/fcm-token-routes.js');
 const pipelineReports = require('./routes/manereja/pipeline-report-routes.js');
 const { migrateScreenPermissions, unlockAllScreenPermissions } = require('./utils/manereja/migrateScreenPermissions');
-const  { fixSubscriberPackages } = require('./run-once.js'); // ← run once, then delete
+//const  { fixSubscriberPackages } = require('./run-once.js'); // ← run once, then delete
 
 
 const rowFlagRoutes   = require('./routes/manereja/rowFlag-routes');
@@ -106,7 +106,7 @@ app.use((req, res, next) => {
 // Health check endpoint
 app.get('/health', (req, res) => {
     res.json({ status: 'OK', timestamp: new Date().toISOString() });
-})
+});
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGO_URL, {
@@ -118,7 +118,7 @@ mongoose.connect(process.env.MONGO_URL, {
 .then(async () => {
     console.log("Connected to MongoDB");
 
-   await PackagesSeed.seedPackages();    // ← must finish first
+  // await PackagesSeed.seedPackages();    // ← must finish first
   //  await migrateSubscriptions();         // ← runs after seed, safe to remove once all users migrated
 
     

@@ -1,41 +1,59 @@
 // controllers/rowFlagController.js
-const RowFlag             = require('../../models/manereja/RowFlag');
-const RowFlagMessage      = require('../../models/manereja/RowFlagMessage');
+const RowFlag              = require('../../models/manereja/RowFlag');
+const RowFlagMessage       = require('../../models/manereja/RowFlagMessage');
 const PipelineStageHistory = require('../../models/manereja/PipelineStageHistory');
-const ReportSubmission    = require('../../models/manereja/report-submission');
-const ReportTemplate      = require('../../models/manereja/report-template');
-const { notifyUser }      = require('../../services/businessNotificationService');
-const RowFlagRead         = require('../../models/manereja/RowFlagRead');
-const { emitToFlagRoom }  = require('../../socket/events/rowFlagEvents');
-const BusinessProfile     = require('../../models/manereja/business-profile');
+const ReportSubmission     = require('../../models/manereja/report-submission');
+const { notifyUser }       = require('../../services/businessNotificationService');
+const RowFlagRead          = require('../../models/manereja/RowFlagRead');
+const { emitToFlagRoom }   = require('../../socket/events/rowFlagEvents');
+const BusinessProfile      = require('../../models/manereja/business-profile');
+const PipelineTemplate     = require('../../models/manereja/PipelineTemplate');
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Constants ─────────────────────────────────────────────────────────────────
 
 const DEFAULT_PIPELINE_STAGES = ['new_lead', 'contacted', 'negotiating', 'closed_won', 'closed_lost'];
 const TERMINAL_STATUSES       = ['resolved', 'closed_won', 'closed_lost'];
 
-// Returns the ordered stage list for a business profile.
-// Falls back to the hardcoded defaults if the profile has none configured.
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+// Returns rich stage objects ({ key, description?, staleThresholdDays? }) for a profile.
+// Falls back to DEFAULT_PIPELINE_STAGES when the profile has none configured.
 async function getPipelineStages(businessProfileId) {
-  if (!businessProfileId) return DEFAULT_PIPELINE_STAGES;
+  if (!businessProfileId) return DEFAULT_PIPELINE_STAGES.map(key => ({ key }));
   try {
     const profile = await BusinessProfile.findById(businessProfileId)
       .select('pipelineStages')
       .lean();
-    if (profile?.pipelineStages?.length) return profile.pipelineStages;
+    if (profile?.pipelineStages?.length) {
+      return profile.pipelineStages.map(s =>
+        typeof s === 'string' ? { key: s } : s
+      );
+    }
   } catch (_) { /* fall through */ }
-  return DEFAULT_PIPELINE_STAGES;
+  return DEFAULT_PIPELINE_STAGES.map(key => ({ key }));
+}
+
+// Returns rich stage objects for a flag.
+// Priority: flag's own snapshotStages (template-sourced) →
+//           profile's pipelineStages (ad-hoc) → hardcoded defaults.
+async function getStagesForFlag(flag) {
+  if (flag.snapshotStages?.length) {
+    return flag.snapshotStages.map(s =>
+      typeof s === 'string' ? { key: s } : s
+    );
+  }
+  return getPipelineStages(flag.businessProfileId);
 }
 
 function getInitialStatus(flagType, stages) {
-  return flagType === 'pipeline' ? (stages?.[0] ?? 'new_lead') : 'open';
+  return flagType === 'pipeline' ? (stages?.[0]?.key ?? stages?.[0] ?? 'new_lead') : 'open';
 }
 
 function isTerminal(status) {
   return TERMINAL_STATUSES.includes(status);
 }
 
-// ── Shared helper: emit a system message into the flag room ───────────────────
+// Emit a system message into the flag room without persisting it to the DB.
 function _emitSystemMessage(app, rowFlag, content) {
   emitToFlagRoom(app, rowFlag._id.toString(), 'flag_message_new', {
     flagId:  rowFlag._id.toString(),
@@ -62,47 +80,110 @@ exports.createRowFlag = async (req, res) => {
       templateId,
       projectId,
       businessProfileId,
-      assignedTo,
+      // Frontend sends assigneeIds (array). Fall back to legacy assignedTo scalar.
+      assigneeIds,
+      assignedTo: legacyAssignedTo,
       contextHeader,
       flagType,
       staleThresholdDays,
+      pipelineTemplateId,
     } = req.body;
 
     const flaggedBy = req.user.id;
 
-    const submission = await ReportSubmission.findById(submissionId);
-    if (!submission) {
-      return res.status(404).json({ success: false, message: 'Submission not found' });
-    }
+    // Normalise to array — accept both new assigneeIds[] and legacy assignedTo scalar.
+    const resolvedAssignees = Array.isArray(assigneeIds) && assigneeIds.length
+      ? assigneeIds
+      : legacyAssignedTo
+        ? [legacyAssignedTo]
+        : [];
 
-    const existing = await RowFlag.findOne({ submissionId, rowId, isDeleted: false });
-    if (existing) {
-      return res.status(409).json({
+    // ── Basic field validation ─────────────────────────────────────────────
+    if (!flagType || !['anomaly', 'pipeline'].includes(flagType)) {
+      return res.status(400).json({ success: false, message: 'flagType must be anomaly or pipeline' });
+    }
+    if (!projectId || !businessProfileId || !resolvedAssignees.length || !contextHeader) {
+      return res.status(400).json({
         success: false,
-        message: 'This row has already been flagged',
-        existingFlagId: existing._id,
+        message: 'projectId, businessProfileId, assigneeIds, and contextHeader are required',
       });
     }
 
-    const stages = await getPipelineStages(businessProfileId);
+    // ── Source validation ──────────────────────────────────────────────────
+    if (flagType === 'anomaly' && !submissionId) {
+      return res.status(400).json({ success: false, message: 'Anomaly flags require a submissionId' });
+    }
+    if (flagType === 'pipeline' && !submissionId && !pipelineTemplateId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Pipeline flags require either a submissionId (row-sourced) or a pipelineTemplateId (template-sourced)',
+      });
+    }
+
+    // ── Row-sourced path: validate submission + block duplicates ──────────
+    if (submissionId) {
+      const submission = await ReportSubmission.findById(submissionId);
+      if (!submission) {
+        return res.status(404).json({ success: false, message: 'Submission not found' });
+      }
+      if (rowId) {
+        const existing = await RowFlag.findOne({ submissionId, rowId, isDeleted: false });
+        if (existing) {
+          return res.status(409).json({
+            success: false,
+            message: 'This row has already been flagged',
+            existingFlagId: existing._id,
+          });
+        }
+      }
+    }
+
+    // ── Template-sourced path: snapshot stages from template ──────────────
+    let snapshotStages = [];
+    let initialStatus;
+
+    if (pipelineTemplateId) {
+      const template = await PipelineTemplate.findOne({
+        _id:               pipelineTemplateId,
+        businessProfileId,
+        isArchived:        false,
+      });
+      if (!template) {
+        return res.status(404).json({ success: false, message: 'Pipeline template not found' });
+      }
+      snapshotStages = template.stages.map(s => s.toObject ? s.toObject() : s);
+      initialStatus  = snapshotStages[0].key;
+    } else {
+      const stages = await getPipelineStages(businessProfileId);
+      initialStatus = getInitialStatus(flagType, stages);
+    }
+
+    // ── Create the flag ───────────────────────────────────────────────────
+    // Schema stores assignedTo as a single ObjectId for backward compat;
+    // use the first assignee as the primary and store the rest in assigneeIds.
+    const primaryAssignee = resolvedAssignees[0];
 
     const rowFlag = await RowFlag.create({
-      submissionId,
-      rowId,
-      templateId,
+      submissionId:       submissionId       ?? null,
+      rowId:              rowId              ?? null,
+      templateId:         templateId         ?? null,
+      pipelineTemplateId: pipelineTemplateId ?? null,
+      snapshotStages,
       projectId,
       businessProfileId,
       flaggedBy,
-      assignedTo,
+      assignedTo:  primaryAssignee,
+      assigneeIds: resolvedAssignees,          // full list stored alongside
       contextHeader,
       flagType,
-      status: getInitialStatus(flagType, stages),
+      status: initialStatus,
       ...(flagType === 'pipeline' && {
         lastStageChangedAt: new Date(),
         staleThresholdDays: staleThresholdDays ?? 3,
       }),
     });
 
+    // ── System message ────────────────────────────────────────────────────
     await RowFlagMessage.create({
       rowFlagId:   rowFlag._id,
       senderId:    null,
@@ -112,24 +193,29 @@ exports.createRowFlag = async (req, res) => {
       messageType: 'system',
     });
 
-    await notifyUser(assignedTo, {
-      title:    '🚩 Row flagged for follow-up',
-      body:     `A row has been assigned to you for review: "${contextHeader}"`,
-      type:     'alert',
-      priority: 'high',
-      persist:  true,
-      actions:  [{ label: 'View Thread', deepLink: `/flags/${rowFlag._id}`, isPrimary: true }],
-      metadata: {
-        event:        'flag_created',
-        flagType,
-        rowFlagId:    rowFlag._id.toString(),
-        submissionId,
-        rowId,
-        contextHeader,
-        projectId,
-      },
-    });
+    // ── Notify all assignees ──────────────────────────────────────────────
+    await Promise.all(resolvedAssignees.map(assigneeId =>
+      notifyUser(assigneeId, {
+        title:    '🚩 Row flagged for follow-up',
+        body:     `A row has been assigned to you for review: "${contextHeader}"`,
+        type:     'alert',
+        priority: 'high',
+        persist:  true,
+        actions:  [{ label: 'View Thread', deepLink: `/flags/${rowFlag._id}`, isPrimary: true }],
+        metadata: {
+          event:              'flag_created',
+          flagType,
+          rowFlagId:          rowFlag._id.toString(),
+          submissionId:       submissionId       ?? null,
+          rowId:              rowId              ?? null,
+          pipelineTemplateId: pipelineTemplateId ?? null,
+          contextHeader,
+          projectId,
+        },
+      })
+    ));
 
+    // ── Real-time emit ────────────────────────────────────────────────────
     emitToFlagRoom(req.app, rowFlag._id.toString(), 'flag_status_changed', {
       flagId:   rowFlag._id.toString(),
       status:   rowFlag.status,
@@ -198,7 +284,12 @@ exports.listRowFlags = async (req, res) => {
 
     const query = {
       isDeleted: false,
-      $or: [{ flaggedBy: userId }, { assignedTo: userId }],
+      // Match flags where the user is the creator OR any assignee.
+      $or: [
+        { flaggedBy: userId },
+        { assignedTo: userId },
+        { assigneeIds: userId },
+      ],
     };
     if (projectId)  query.projectId  = projectId;
     if (assignedTo) query.assignedTo = assignedTo;
@@ -220,10 +311,7 @@ exports.listRowFlags = async (req, res) => {
 
     const flagIds = flags.map(f => f._id);
 
-    const readReceipts = await RowFlagRead.find({
-      flagId: { $in: flagIds },
-      userId,
-    }).lean();
+    const readReceipts = await RowFlagRead.find({ flagId: { $in: flagIds }, userId }).lean();
 
     const lastReadMap = {};
     for (const r of readReceipts) {
@@ -265,13 +353,16 @@ exports.listRowFlags = async (req, res) => {
 
 exports.reassignFlag = async (req, res) => {
   try {
-    const { assignedTo } = req.body;
+    // Accept both new assigneeIds[] and legacy assignedTo scalar.
+    const { assigneeIds, assignedTo: legacyAssignedTo } = req.body;
+    const resolvedAssignees = Array.isArray(assigneeIds) && assigneeIds.length
+      ? assigneeIds
+      : legacyAssignedTo
+        ? [legacyAssignedTo]
+        : [];
 
-    if (!assignedTo) {
-      return res.status(400).json({
-        success: false,
-        message: 'assignedTo (userId) is required',
-      });
+    if (!resolvedAssignees.length) {
+      return res.status(400).json({ success: false, message: 'assigneeIds is required' });
     }
 
     const rowFlag = await RowFlag.findOne({ _id: req.params.id, isDeleted: false });
@@ -280,17 +371,7 @@ exports.reassignFlag = async (req, res) => {
     }
 
     if (rowFlag.flaggedBy.toString() !== req.user.id) {
-      return res.status(403).json({
-        success: false,
-        message: 'Only the flag creator can reassign this flag',
-      });
-    }
-
-    if (rowFlag.assignedTo.toString() === assignedTo) {
-      return res.status(400).json({
-        success: false,
-        message: 'Flag is already assigned to this user',
-      });
+      return res.status(403).json({ success: false, message: 'Only the flag creator can reassign this flag' });
     }
 
     const profile = await BusinessProfile.findById(rowFlag.businessProfileId).lean();
@@ -298,17 +379,21 @@ exports.reassignFlag = async (req, res) => {
       return res.status(404).json({ success: false, message: 'Business profile not found' });
     }
 
-    const isOwner  = profile.ownerId.toString() === assignedTo;
-    const isMember = profile.members && profile.members[assignedTo] !== undefined;
-
-    if (!isOwner && !isMember) {
-      return res.status(403).json({
-        success: false,
-        message: 'New assignee must be a member of this business profile',
-      });
+    // Validate every new assignee is a member or owner of this profile.
+    for (const assigneeId of resolvedAssignees) {
+      const isOwner  = profile.ownerId.toString() === assigneeId;
+      const isMember = profile.members && profile.members[assigneeId] !== undefined;
+      if (!isOwner && !isMember) {
+        return res.status(403).json({
+          success: false,
+          message: `User ${assigneeId} must be a member of this business profile`,
+        });
+      }
     }
 
-    rowFlag.assignedTo = assignedTo;
+    const primaryAssignee = resolvedAssignees[0];
+    rowFlag.assignedTo  = primaryAssignee;
+    rowFlag.assigneeIds = resolvedAssignees;
     await rowFlag.save();
 
     const populated = await RowFlag.findById(rowFlag._id)
@@ -323,21 +408,24 @@ exports.reassignFlag = async (req, res) => {
       messageType: 'system',
     });
 
-    await notifyUser(assignedTo, {
-      title:    '🚩 Flag assigned to you',
-      body:     `You have been assigned a flag for review: "${rowFlag.contextHeader}"`,
-      type:     'alert',
-      priority: 'high',
-      persist:  true,
-      actions:  [{ label: 'View Thread', deepLink: `/flags/${rowFlag._id}`, isPrimary: true }],
-      metadata: {
-        event:         'flag_reassigned',
-        flagType:      rowFlag.flagType,
-        rowFlagId:     rowFlag._id.toString(),
-        contextHeader: rowFlag.contextHeader,
-        projectId:     rowFlag.projectId?.toString(),
-      },
-    });
+    // Notify all new assignees.
+    await Promise.all(resolvedAssignees.map(assigneeId =>
+      notifyUser(assigneeId, {
+        title:    '🚩 Flag assigned to you',
+        body:     `You have been assigned a flag for review: "${rowFlag.contextHeader}"`,
+        type:     'alert',
+        priority: 'high',
+        persist:  true,
+        actions:  [{ label: 'View Thread', deepLink: `/flags/${rowFlag._id}`, isPrimary: true }],
+        metadata: {
+          event:         'flag_reassigned',
+          flagType:      rowFlag.flagType,
+          rowFlagId:     rowFlag._id.toString(),
+          contextHeader: rowFlag.contextHeader,
+          projectId:     rowFlag.projectId?.toString(),
+        },
+      })
+    ));
 
     _emitSystemMessage(req.app, rowFlag, systemContent);
     emitToFlagRoom(req.app, rowFlag._id.toString(), 'flag_reassigned', {
@@ -377,21 +465,24 @@ exports.resolveAnomaly = async (req, res) => {
       content: systemContent, messageType: 'system',
     });
 
-    await notifyUser(rowFlag.assignedTo.toString(), {
-      title:    '✅ Flag resolved',
-      body:     `Your flagged row "${rowFlag.contextHeader}" has been resolved.`,
-      type:     'alert',
-      priority: 'normal',
-      persist:  true,
-      actions:  [{ label: 'View Thread', deepLink: `/flags/${rowFlag._id}`, isPrimary: true }],
-      metadata: {
-        event:         'flag_resolved',
-        flagType:      'anomaly',
-        rowFlagId:     rowFlag._id.toString(),
-        contextHeader: rowFlag.contextHeader,
-        projectId:     rowFlag.projectId.toString(),
-      },
-    });
+    const assignees = rowFlag.assigneeIds?.length ? rowFlag.assigneeIds : [rowFlag.assignedTo.toString()];
+    await Promise.all(assignees.map(assigneeId =>
+      notifyUser(assigneeId.toString(), {
+        title:    '✅ Flag resolved',
+        body:     `Your flagged row "${rowFlag.contextHeader}" has been resolved.`,
+        type:     'alert',
+        priority: 'normal',
+        persist:  true,
+        actions:  [{ label: 'View Thread', deepLink: `/flags/${rowFlag._id}`, isPrimary: true }],
+        metadata: {
+          event:         'flag_resolved',
+          flagType:      'anomaly',
+          rowFlagId:     rowFlag._id.toString(),
+          contextHeader: rowFlag.contextHeader,
+          projectId:     rowFlag.projectId.toString(),
+        },
+      })
+    ));
 
     _emitSystemMessage(req.app, rowFlag, systemContent);
     emitToFlagRoom(req.app, rowFlag._id.toString(), 'flag_status_changed', {
@@ -429,21 +520,24 @@ exports.reopenAnomaly = async (req, res) => {
       content: systemContent, messageType: 'system',
     });
 
-    await notifyUser(rowFlag.assignedTo.toString(), {
-      title:    '🔁 Flag reopened',
-      body:     `Your flagged row "${rowFlag.contextHeader}" has been reopened and requires attention.`,
-      type:     'alert',
-      priority: 'high',
-      persist:  true,
-      actions:  [{ label: 'View Thread', deepLink: `/flags/${rowFlag._id}`, isPrimary: true }],
-      metadata: {
-        event:         'flag_reopened',
-        flagType:      'anomaly',
-        rowFlagId:     rowFlag._id.toString(),
-        contextHeader: rowFlag.contextHeader,
-        projectId:     rowFlag.projectId.toString(),
-      },
-    });
+    const assignees = rowFlag.assigneeIds?.length ? rowFlag.assigneeIds : [rowFlag.assignedTo.toString()];
+    await Promise.all(assignees.map(assigneeId =>
+      notifyUser(assigneeId.toString(), {
+        title:    '🔁 Flag reopened',
+        body:     `Your flagged row "${rowFlag.contextHeader}" has been reopened and requires attention.`,
+        type:     'alert',
+        priority: 'high',
+        persist:  true,
+        actions:  [{ label: 'View Thread', deepLink: `/flags/${rowFlag._id}`, isPrimary: true }],
+        metadata: {
+          event:         'flag_reopened',
+          flagType:      'anomaly',
+          rowFlagId:     rowFlag._id.toString(),
+          contextHeader: rowFlag.contextHeader,
+          projectId:     rowFlag.projectId.toString(),
+        },
+      })
+    ));
 
     _emitSystemMessage(req.app, rowFlag, systemContent);
     emitToFlagRoom(req.app, rowFlag._id.toString(), 'flag_status_changed', {
@@ -460,9 +554,6 @@ exports.reopenAnomaly = async (req, res) => {
 };
 
 // ── PATCH /api/row-flags/:id/move-stage ──────────────────────────────────────
-// Move to any stage — forward, backward, or terminal.
-// Validates against the profile's custom stages when configured,
-// falling back to DEFAULT_PIPELINE_STAGES.
 
 exports.movePipelineStage = async (req, res) => {
   try {
@@ -473,13 +564,18 @@ exports.movePipelineStage = async (req, res) => {
       _id: req.params.id, flagType: 'pipeline', isDeleted: false,
     });
 
-    if (!rowFlag) return res.status(404).json({ success: false, message: 'Pipeline flag not found' });
+    if (!rowFlag) {
+      return res.status(404).json({ success: false, message: 'Pipeline flag not found' });
+    }
 
-    const allowedStages = await getPipelineStages(rowFlag.businessProfileId);
-    if (!allowedStages.includes(toStage)) {
+    const stageObjects = await getStagesForFlag(rowFlag);
+    const matchedStage = stageObjects.find(s => (s.key ?? s) === toStage);
+
+    if (!matchedStage) {
+      const stageKeys = stageObjects.map(s => s.key ?? s);
       return res.status(400).json({
         success: false,
-        message: `Invalid stage. Must be one of: ${allowedStages.join(', ')}`,
+        message: `Invalid stage. Must be one of: ${stageKeys.join(', ')}`,
       });
     }
 
@@ -490,12 +586,17 @@ exports.movePipelineStage = async (req, res) => {
     const fromStage = rowFlag.status;
 
     await PipelineStageHistory.create({
-      rowFlagId: rowFlag._id, changedBy: bossId,
-      fromStage, toStage, note: note ?? null,
+      rowFlagId: rowFlag._id,
+      changedBy: bossId,
+      fromStage,
+      toStage,
+      note: note ?? null,
     });
 
-    rowFlag.status             = toStage;
-    rowFlag.lastStageChangedAt = new Date();
+    rowFlag.status = toStage;
+    if (matchedStage.staleThresholdDays != null) {
+      rowFlag.staleThresholdDays = matchedStage.staleThresholdDays;
+    }
     await rowFlag.save();
 
     const stageLabel    = toStage.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
@@ -504,33 +605,38 @@ exports.movePipelineStage = async (req, res) => {
     const isClosedLost  = toStage === 'closed_lost';
 
     await RowFlagMessage.create({
-      rowFlagId: rowFlag._id, senderId: null,
-      content: systemContent, messageType: 'system',
+      rowFlagId:   rowFlag._id,
+      senderId:    null,
+      content:     systemContent,
+      messageType: 'system',
     });
 
-    await notifyUser(rowFlag.assignedTo.toString(), {
-      title:    isClosedWon  ? '🎉 Deal closed!'
-               : isClosedLost ? '❌ Deal closed (lost)'
-               :               '📊 Pipeline stage updated',
-      body:     `"${rowFlag.contextHeader}" has moved to: ${stageLabel}`,
-      type:     'alert',
-      priority: isClosedWon ? 'high' : 'normal',
-      persist:  true,
-      actions:  [{
-        label:     isClosedWon || isClosedLost ? 'View Result' : 'View Pipeline',
-        deepLink:  `/flags/${rowFlag._id}`,
-        isPrimary: true,
-      }],
-      metadata: {
-        event:         'pipeline_stage_moved',
-        flagType:      'pipeline',
-        rowFlagId:     rowFlag._id.toString(),
-        fromStage,
-        toStage,
-        contextHeader: rowFlag.contextHeader,
-        projectId:     rowFlag.projectId?.toString(),
-      },
-    });
+    const assignees = rowFlag.assigneeIds?.length ? rowFlag.assigneeIds : [rowFlag.assignedTo.toString()];
+    await Promise.all(assignees.map(assigneeId =>
+      notifyUser(assigneeId.toString(), {
+        title:    isClosedWon  ? '🎉 Deal closed!'
+                 : isClosedLost ? '❌ Deal closed (lost)'
+                 :                '📊 Pipeline stage updated',
+        body:     `"${rowFlag.contextHeader}" has moved to: ${stageLabel}`,
+        type:     'alert',
+        priority: isClosedWon ? 'high' : 'normal',
+        persist:  true,
+        actions:  [{
+          label:     isClosedWon || isClosedLost ? 'View Result' : 'View Pipeline',
+          deepLink:  `/flags/${rowFlag._id}`,
+          isPrimary: true,
+        }],
+        metadata: {
+          event:         'pipeline_stage_moved',
+          flagType:      'pipeline',
+          rowFlagId:     rowFlag._id.toString(),
+          fromStage,
+          toStage,
+          contextHeader: rowFlag.contextHeader,
+          projectId:     rowFlag.projectId?.toString(),
+        },
+      })
+    ));
 
     _emitSystemMessage(req.app, rowFlag, systemContent);
     emitToFlagRoom(req.app, rowFlag._id.toString(), 'flag_status_changed', {
@@ -549,8 +655,7 @@ exports.movePipelineStage = async (req, res) => {
   }
 };
 
-// ── GET /api/business-profiles/:profileId/pipeline-stages ────────────────────
-// Returns the ordered stage list for a profile (custom or default).
+// ── GET /profiles/:profileId/pipeline-stages ──────────────────────────────────
 
 exports.getPipelineStagesForProfile = async (req, res) => {
   try {
@@ -562,34 +667,37 @@ exports.getPipelineStagesForProfile = async (req, res) => {
   }
 };
 
-// ── PUT /api/business-profiles/:profileId/pipeline-stages ────────────────────
-// Owner/admin only. Replaces the full ordered stage list for a profile.
-// Rules: 2–10 items, unique, non-empty, must include at least one terminal
-// stage (closed_won or closed_lost).
+// ── PUT /profiles/:profileId/pipeline-stages ──────────────────────────────────
 
 exports.updatePipelineStagesForProfile = async (req, res) => {
   try {
     const { stages } = req.body;
 
     if (!Array.isArray(stages) || stages.length < 2 || stages.length > 10) {
-      return res.status(400).json({
-        success: false,
-        message: 'stages must be an array of 2–10 items',
-      });
+      return res.status(400).json({ success: false, message: 'stages must be an array of 2–10 items' });
     }
 
-    const cleaned = stages.map(s => String(s).trim().toLowerCase().replace(/\s+/g, '_'));
+    const normalised = stages.map(s => {
+      const key = typeof s === 'string'
+        ? s.trim().toLowerCase().replace(/\s+/g, '_')
+        : String(s.key ?? '').trim().toLowerCase().replace(/\s+/g, '_');
+      const obj = { key };
+      if (s.description && typeof s.description === 'string' && s.description.trim()) {
+        obj.description = s.description.trim();
+      }
+      if (s.staleThresholdDays != null && Number.isFinite(Number(s.staleThresholdDays))) {
+        obj.staleThresholdDays = Math.round(Number(s.staleThresholdDays));
+      }
+      return obj;
+    });
 
-    if (cleaned.some(s => !s)) {
-      return res.status(400).json({ success: false, message: 'Stage names cannot be empty' });
+    if (normalised.some(s => !s.key)) {
+      return res.status(400).json({ success: false, message: 'Stage keys cannot be empty' });
     }
-
-    if (new Set(cleaned).size !== cleaned.length) {
-      return res.status(400).json({ success: false, message: 'Stage names must be unique' });
+    if (new Set(normalised.map(s => s.key)).size !== normalised.length) {
+      return res.status(400).json({ success: false, message: 'Stage keys must be unique' });
     }
-
-    const hasTerminal = cleaned.some(s => TERMINAL_STATUSES.includes(s));
-    if (!hasTerminal) {
+    if (!normalised.some(s => TERMINAL_STATUSES.includes(s.key))) {
       return res.status(400).json({
         success: false,
         message: 'Stages must include at least one terminal stage (closed_won or closed_lost)',
@@ -598,11 +706,12 @@ exports.updatePipelineStagesForProfile = async (req, res) => {
 
     const profile = await BusinessProfile.findByIdAndUpdate(
       req.params.profileId,
-      { $set: { pipelineStages: cleaned } },
+      { $set: { pipelineStages: normalised } },
       { new: true, select: 'pipelineStages' },
     );
-
-    if (!profile) return res.status(404).json({ success: false, message: 'Profile not found' });
+    if (!profile) {
+      return res.status(404).json({ success: false, message: 'Profile not found' });
+    }
 
     return res.json({ success: true, stages: profile.pipelineStages });
   } catch (err) {
@@ -622,19 +731,22 @@ exports.deleteRowFlag = async (req, res) => {
     rowFlag.deletedAt = new Date();
     await rowFlag.save();
 
-    await notifyUser(rowFlag.assignedTo.toString(), {
-      title:    'Flag removed',
-      body:     `The flagged row "${rowFlag.contextHeader}" has been removed.`,
-      type:     'alert',
-      priority: 'normal',
-      persist:  false,
-      metadata: {
-        event:         'flag_deleted',
-        flagType:      rowFlag.flagType,
-        rowFlagId:     rowFlag._id.toString(),
-        contextHeader: rowFlag.contextHeader,
-      },
-    });
+    const assignees = rowFlag.assigneeIds?.length ? rowFlag.assigneeIds : [rowFlag.assignedTo.toString()];
+    await Promise.all(assignees.map(assigneeId =>
+      notifyUser(assigneeId.toString(), {
+        title:    'Flag removed',
+        body:     `The flagged row "${rowFlag.contextHeader}" has been removed.`,
+        type:     'alert',
+        priority: 'normal',
+        persist:  false,
+        metadata: {
+          event:         'flag_deleted',
+          flagType:      rowFlag.flagType,
+          rowFlagId:     rowFlag._id.toString(),
+          contextHeader: rowFlag.contextHeader,
+        },
+      })
+    ));
 
     emitToFlagRoom(req.app, rowFlag._id.toString(), 'flag_status_changed', {
       flagId:   rowFlag._id.toString(),
@@ -650,29 +762,21 @@ exports.deleteRowFlag = async (req, res) => {
 };
 
 // ── PATCH /api/row-flags/:id (title) ─────────────────────────────────────────
-// Only the flag creator may rename it.
 
 exports.updateFlagTitle = async (req, res) => {
   try {
     const { contextHeader } = req.body;
 
     if (!contextHeader || typeof contextHeader !== 'string' || !contextHeader.trim()) {
-      return res.status(400).json({
-        success: false,
-        message: 'contextHeader is required and must be a non-empty string',
-      });
+      return res.status(400).json({ success: false, message: 'contextHeader is required and must be a non-empty string' });
     }
 
     const rowFlag = await RowFlag.findOne({ _id: req.params.id, isDeleted: false });
     if (!rowFlag) {
       return res.status(404).json({ success: false, message: 'Flag not found' });
     }
-
     if (rowFlag.flaggedBy.toString() !== req.user.id) {
-      return res.status(403).json({
-        success: false,
-        message: 'Only the flag creator can edit the title',
-      });
+      return res.status(403).json({ success: false, message: 'Only the flag creator can edit the title' });
     }
 
     const oldHeader = rowFlag.contextHeader;
@@ -696,6 +800,107 @@ exports.updateFlagTitle = async (req, res) => {
     return res.json({ success: true, rowFlag });
   } catch (err) {
     console.error('updateFlagTitle error:', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PIPELINE TEMPLATES
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── GET /profiles/:profileId/pipeline-templates ───────────────────────────────
+
+exports.listPipelineTemplates = async (req, res) => {
+  try {
+    const templates = await PipelineTemplate.find({
+      businessProfileId: req.params.profileId,
+      isArchived:        false,
+    }).sort({ createdAt: -1 }).lean();
+
+    return res.json({ success: true, templates });
+  } catch (err) {
+    console.error('listPipelineTemplates error:', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── POST /profiles/:profileId/pipeline-templates ──────────────────────────────
+
+exports.createPipelineTemplate = async (req, res) => {
+  try {
+    const { name, description, stages } = req.body;
+
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ success: false, message: 'name is required' });
+    }
+    if (!Array.isArray(stages) || stages.length < 2) {
+      return res.status(400).json({ success: false, message: 'stages must be an array of at least 2 items' });
+    }
+
+    const template = await PipelineTemplate.create({
+      businessProfileId: req.params.profileId,
+      name:              name.trim(),
+      description:       description?.trim() ?? undefined,
+      stages,
+      createdBy:         req.user.id,
+    });
+
+    return res.status(201).json({ success: true, template });
+  } catch (err) {
+    console.error('createPipelineTemplate error:', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── PATCH /profiles/:profileId/pipeline-templates/:templateId ────────────────
+
+exports.updatePipelineTemplate = async (req, res) => {
+  try {
+    const { name, description, stages } = req.body;
+
+    const update = {};
+    if (name        != null) update.name        = name.trim();
+    if (description != null) update.description = description.trim();
+    if (stages      != null) update.stages      = stages;
+
+    if (!Object.keys(update).length) {
+      return res.status(400).json({ success: false, message: 'Nothing to update' });
+    }
+
+    const template = await PipelineTemplate.findOneAndUpdate(
+      { _id: req.params.templateId, businessProfileId: req.params.profileId, isArchived: false },
+      { $set: update },
+      { new: true },
+    );
+    if (!template) {
+      return res.status(404).json({ success: false, message: 'Template not found' });
+    }
+
+    return res.json({ success: true, template });
+  } catch (err) {
+    console.error('updatePipelineTemplate error:', err);
+    return res.status(500).json({ success: false, message: err.message });
+  }
+};
+
+// ── DELETE /profiles/:profileId/pipeline-templates/:templateId ───────────────
+// Soft-archives the template; existing flags with this templateId are unaffected
+// because they use snapshotStages.
+
+exports.archivePipelineTemplate = async (req, res) => {
+  try {
+    const template = await PipelineTemplate.findOneAndUpdate(
+      { _id: req.params.templateId, businessProfileId: req.params.profileId },
+      { $set: { isArchived: true } },
+      { new: true },
+    );
+    if (!template) {
+      return res.status(404).json({ success: false, message: 'Template not found' });
+    }
+
+    return res.json({ success: true, message: 'Template archived' });
+  } catch (err) {
+    console.error('archivePipelineTemplate error:', err);
     return res.status(500).json({ success: false, message: err.message });
   }
 };

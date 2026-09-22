@@ -193,7 +193,12 @@ const BusinessProfileSchema = new mongoose.Schema({
   fiscalYearStart: { type: Date },
   industry: { type: String },
   lastAccessedAt: { type: Date },
-  settings: { type: Map, of: mongoose.Schema.Types.Mixed }
+  settings: { type: Map, of: mongoose.Schema.Types.Mixed },
+    // Custom pipeline stage configuration.
+  // Each item is either a legacy bare string key or a rich object:
+  //   { key: String, description?: String, staleThresholdDays?: Number }
+  // Mixed type intentionally — supports gradual migration from old string-only API.
+  pipelineStages: { type: [mongoose.Schema.Types.Mixed], default: [] },
 }, {
   timestamps: true
 });

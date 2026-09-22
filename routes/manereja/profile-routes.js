@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const profileController = require('../../controllers/manereja/profile-controller');
 const migrationController = require('../../controllers/manereja/migration-controller');
+const rowFlagCtrl = require('../../controllers/manereja/rowFlagController');
+const pipelineTemplateCtrl = require('../../controllers/manereja/pipelineTemplateController');
 const { authenticateToken } = require('../../middleware/auth');
 
 // All routes require authentication
@@ -26,6 +28,10 @@ router.patch('/:profileId/permissions', profileController.updateScreenPermission
 router.patch('/:profileId/permissions/bulk', profileController.updateMultipleScreenPermissions);
 router.post('/:profileId/permissions/reset', profileController.resetScreenPermissions);
 
+// Add these two lines alongside the other /:profileId routes
+router.get('/:profileId/pipeline-stages', rowFlagCtrl.getPipelineStagesForProfile);
+router.put('/:profileId/pipeline-stages', rowFlagCtrl.updatePipelineStagesForProfile);
+
 
 // ============================================
 // NEW MIGRATION ROUTES
@@ -39,5 +45,14 @@ router.post('/profiles/migrate',  migrationController.runMigration);
 router.get('/profiles/migrate/status',  migrationController.getStatus);
 router.post('/profiles/migrate/add-screens', migrationController.addScreens);
 router.post('/profiles/migrate/remove-screens', migrationController.removeScreens);
+
+
+
+
+// Pipeline templates (profile-scoped)
+router.get( '/:profileId/pipeline-templates',              pipelineTemplateCtrl.listTemplates);
+router.post('/:profileId/pipeline-templates',              pipelineTemplateCtrl.createTemplate);
+router.patch('/:profileId/pipeline-templates/:templateId', pipelineTemplateCtrl.updateTemplate);
+router.delete('/:profileId/pipeline-templates/:templateId',pipelineTemplateCtrl.archiveTemplate);
 
 module.exports = router;
