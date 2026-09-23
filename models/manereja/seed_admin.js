@@ -6,7 +6,7 @@ const SUPER_ADMIN = {
   password: "Manereja@Admin2024!",   // ← your password
   role:     "super_admin",
   isActive: true,
-};
+}
 
 async function seedAdmin() {
   try {
