@@ -309,6 +309,39 @@ updateProfile = async (req, res) => {
   }
 };
 
+// Search profiles by name (public/discoverable profiles)
+searchProfiles = async (req, res) => {
+  try {
+    const { q } = req.query;
+
+    if (!q || q.trim().length < 2) {
+      return this.successResponse(res, 'Search results', { profiles: [] });
+    }
+
+    const profiles = await BusinessProfile.find({
+      name: { $regex: q.trim(), $options: 'i' },
+      isActive: true,
+      isArchived: false,
+    })
+      .select('name icon color industry')
+      .limit(10)
+      .lean();
+
+    return this.successResponse(res, 'Search results', {
+      profiles: profiles.map(p => ({
+        id: p._id.toString(),
+        name: p.name,
+        icon: p.icon,
+        color: p.color,
+        industry: p.industry,
+      })),
+    });
+  } catch (error) {
+    console.error('Search profiles error:', error);
+    return this.errorResponse(res, 'Error searching profiles', 500);
+  }
+};
+
   // Delete profile
   deleteProfile = async (req, res) => {
     try {

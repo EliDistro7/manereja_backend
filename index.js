@@ -38,7 +38,7 @@ const fcmTokenRoutes = require('./routes/manereja/fcm-token-routes.js');
 const pipelineReports = require('./routes/manereja/pipeline-report-routes.js');
 const { migrateScreenPermissions, unlockAllScreenPermissions } = require('./utils/manereja/migrateScreenPermissions');
 //const  { fixSubscriberPackages } = require('./run-once.js'); // ← run once, then delete
-
+const dataAccessRequestRoutes = require('./routes/manereja/data-access-requests.js');
 
 const rowFlagRoutes   = require('./routes/manereja/rowFlag-routes');
 const rowReportRoutes = require('./routes/manereja/rowReport-routes');
@@ -156,6 +156,7 @@ app.use('/profiles', profileRoutes);
 app.use('/api/sales-items', salesItemRoutes);
 app.use('/api/attendance', attendanceRoutes);
 app.use('/api/projects', projectRoutes);
+app.use('/api/data-access-requests', dataAccessRequestRoutes);
 app.use('/api/tasks', taskRoutes);
 
 app.use('/emails', emailRoutes);

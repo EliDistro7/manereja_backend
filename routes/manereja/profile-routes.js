@@ -10,6 +10,7 @@ const { authenticateToken } = require('../../middleware/auth');
 router.use(authenticateToken);
 
 // Profile CRUD
+router.get('/search', profileController.searchProfiles);
 router.get('/', profileController.getUserProfiles);
 router.get('/:profileId', profileController.getProfileById);
 router.post('/', profileController.createProfile);
