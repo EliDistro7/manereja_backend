@@ -26,11 +26,14 @@ const reportTemplateColumnSchema = new mongoose.Schema({
       'text', 'number', 'date', 'time', 'dropdown',
       'checkbox', 'currency', 'percentage',
       'coordinates',  // lat/lng + address — picked via MapPickerScreen
+      "formula"
     ],
     required: true,
   },
   required:        { type: Boolean, default: false },
   dropdownOptions: [{ type: String }],
+  pointsFormula: { type: String, default: undefined },
+  formulaExpression: { type: String, default: undefined },
   minValue:        { type: Number },
   maxValue:        { type: Number },
   placeholder:     { type: String },

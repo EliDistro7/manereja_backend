@@ -354,7 +354,6 @@ function formatReportTemplate(template) {
     name:                     template.name,
     description:              template.description,
     columns: template.columns.map(col => {
-      // Mongoose Map → plain object (safe for JSON serialisation)
       const optionPoints = col.dropdownOptionPoints instanceof Map
         ? Object.fromEntries(col.dropdownOptionPoints)
         : (col.dropdownOptionPoints ?? undefined);
@@ -371,6 +370,8 @@ function formatReportTemplate(template) {
         defaultValue:         col.defaultValue,
         points:               col.points ?? null,
         dropdownOptionPoints: optionPoints,
+        formulaExpression:    col.formulaExpression ?? undefined,
+         pointsFormula:        col.pointsFormula     ?? undefined,
       };
     }),
     requiresApproval:         template.requiresApproval,
