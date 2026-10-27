@@ -157,7 +157,7 @@ function formatReportTemplate(template) {
   // ==========================================
   socket.on('create_project', async ({
     name, description, businessProfileId,
-    goalDescription, goalTargetValue, goalUnit, userId
+    goalDescription, goalTargetValue, goalUnit, userId,coverImageUrl,
   }) => {
     try {
       const profile = await BusinessProfile.findById(businessProfileId);
@@ -169,6 +169,7 @@ function formatReportTemplate(template) {
       const newProject = new Project({
         name, description, businessProfileId,
         createdBy: userId, projectLead: userId,
+        coverImageUrl: coverImageUrl || null,
         goalDescription, goalTargetValue, goalUnit,
         status: 'draft',
         createdAt: new Date(), updatedAt: new Date(),
@@ -1762,6 +1763,7 @@ function formatReportTemplate(template) {
       progressPercentage:  project.progressPercentage,
       totalTaskWeight:     project.totalTaskWeight,
       completedTaskWeight: project.completedTaskWeight,
+      coverImageUrl:     project.coverImageUrl ?? null,
       createdAt:         project.createdAt,
       updatedAt:         project.updatedAt,
     };

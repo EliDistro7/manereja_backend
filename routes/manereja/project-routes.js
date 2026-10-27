@@ -101,9 +101,10 @@ router.get('/', authenticateToken, verifyProfileAccess, async (req, res) => {
       progressPercentage: project.progressPercentage || 0,
       totalTaskWeight: project.totalTaskWeight || 0,
       completedTaskWeight: project.completedTaskWeight || 0,
+      coverImageUrl: project.coverImageUrl ?? null,
       createdAt: project.createdAt,
       updatedAt: project.updatedAt,
-      // Include populated user details
+      // Include populated user detail
       creator: project.createdBy?.name ? {
         id: project.createdBy._id.toString(),
         name: project.createdBy.name,
@@ -178,6 +179,7 @@ router.get('/status/:status', authenticateToken, verifyProfileAccess, async (req
       progressPercentage: project.progressPercentage || 0,
       totalTasks: project.totalTasks || 0,
       completedTasks: project.completedTasks || 0,
+      coverImageUrl: project.coverImageUrl ?? null,
       createdAt: project.createdAt,
       updatedAt: project.updatedAt,
       creator: project.createdBy?.name ? {
@@ -437,6 +439,7 @@ router.get('/user/my-projects', authenticateToken, verifyProfileAccess, async (r
       progressPercentage: project.progressPercentage || 0,
       totalTasks: project.totalTasks || 0,
       completedTasks: project.completedTasks || 0,
+      coverImageUrl: project.coverImageUrl ?? null,
       role: project.createdBy?.toString() === userId ? 'creator' 
           : project.projectLead?.toString() === userId ? 'lead' 
           : 'member',
@@ -581,7 +584,9 @@ router.get('/:projectId', authenticateToken, async (req, res) => {
         completedTasks: completedTaskCount,
         progressPercentage: project.progressPercentage || 0,
         totalTaskWeight: project.totalTaskWeight || 0,
+        
         completedTaskWeight: project.completedTaskWeight || 0,
+        coverImageUrl: project.coverImageUrl ?? null,
         createdAt: project.createdAt,
         updatedAt: project.updatedAt,
         creator: project.createdBy?.name ? {

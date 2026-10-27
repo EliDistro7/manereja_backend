@@ -6,6 +6,7 @@
 //   isPinned  : boolean
 //   expiresAt : Date | null   — auto-excluded from queries via notActive()
 //   readByIds : [userId]      — optimistic read-tracking
+//   imageUrls : [String]      — optional attached images (max 5)
 
 'use strict';
 
@@ -59,6 +60,14 @@ const NoticeSchema = new Schema(
       required:  true,
       trim:      true,
       maxlength: 5000,
+    },
+
+    // ── Images ────────────────────────────────────────────────────────────
+    // URLs returned by the upload endpoint after the client uploads the file.
+    // Capped at 5 at the application layer (see noticeEvents.js).
+    imageUrls: {
+      type:    [String],
+      default: [],
     },
 
     // ── Metadata ──────────────────────────────────────────────────────────
@@ -157,6 +166,7 @@ NoticeSchema.methods.toSocketPayload = function () {
     authorName:  this.authorName,
     title:       this.title,
     body:        this.body,
+    imageUrls:   this.imageUrls ?? [],          // ← IMAGE
     priority:    this.priority,
     category:    this.category,
     isPinned:    this.isPinned,

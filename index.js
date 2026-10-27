@@ -40,6 +40,8 @@ const { migrateScreenPermissions, unlockAllScreenPermissions } = require('./util
 //const  { fixSubscriberPackages } = require('./run-once.js'); // ← run once, then delete
 const dataAccessRequestRoutes = require('./routes/manereja/data-access-requests.js');
 
+const r2Routes = require('./routes/manereja/r2-routes');
+
 const rowFlagRoutes   = require('./routes/manereja/rowFlag-routes');
 const rowReportRoutes = require('./routes/manereja/rowReport-routes');
 const startRowFlagCron = require('./jobs/rowFlagCron');
@@ -149,7 +151,9 @@ app.use('/locations', locationRoutes);
 app.use('/', userRoutes);
 app.use('/', serviceRoutes);
 
-app.use('/api', fcmTokenRoutes); // Add FCM token routes under /api prefix
+app.use('/api', fcmTokenRoutes); 
+
+app.use('/api/r2', r2Routes);
 
 app.use('/sync', syncRoutes);
 app.use('/profiles', profileRoutes);

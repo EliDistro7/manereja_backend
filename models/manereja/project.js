@@ -140,6 +140,11 @@ const projectSchema = new mongoose.Schema({
   icon: {
     type: String,
   },
+
+  coverImageUrl: {
+    type: String,
+    trim: true,
+  },
   
   // Metadata
   metadata: {

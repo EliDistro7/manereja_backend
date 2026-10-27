@@ -26,7 +26,8 @@ const reportTemplateColumnSchema = new mongoose.Schema({
       'text', 'number', 'date', 'time', 'dropdown',
       'checkbox', 'currency', 'percentage',
       'coordinates',  // lat/lng + address — picked via MapPickerScreen
-      "formula"
+      "formula",
+       'image',
     ],
     required: true,
   },
@@ -34,10 +35,24 @@ const reportTemplateColumnSchema = new mongoose.Schema({
   dropdownOptions: [{ type: String }],
   pointsFormula: { type: String, default: undefined },
   formulaExpression: { type: String, default: undefined },
+
+
   minValue:        { type: Number },
   maxValue:        { type: Number },
   placeholder:     { type: String },
   defaultValue:    { type: String },
+
+maxImages: {
+  type:    Number,
+  min:     1,
+  max:     10,
+  default: undefined,   // absent unless type === 'image'
+},
+imagePrefix: {
+  type:    String,
+  trim:    true,
+  default: undefined,  // absent unless type === 'image'
+},
 
   // ── Points scoring ──────────────────────────────────────────────────────────
   //

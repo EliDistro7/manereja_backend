@@ -7,11 +7,29 @@ const { emitToFlagRoom } = require('../../socket/events/rowFlagEvents');
 // ── POST /api/row-flags/:id/messages ─────────────────────────────────────────
 exports.postMessage = async (req, res) => {
   try {
-    const { content } = req.body;
+    const { content, imageUrls } = req.body;
     const senderId = req.user.id;
 
-    if (!content || typeof content !== 'string' || !content.trim()) {
-      return res.status(400).json({ success: false, message: 'content is required' });
+    // Content is optional when images are present; required otherwise.
+    const hasContent = content && typeof content === 'string' && content.trim();
+    const hasImages  = Array.isArray(imageUrls) && imageUrls.length > 0;
+
+    if (!hasContent && !hasImages) {
+      return res.status(400).json({
+        success: false,
+        message: 'content or at least one imageUrl is required',
+      });
+    }
+
+    // Validate imageUrls when present.
+    if (hasImages) {
+      if (imageUrls.length > 10) {
+        return res.status(400).json({ success: false, message: 'A message may not contain more than 10 images' });
+      }
+      const allStrings = imageUrls.every(u => typeof u === 'string' && u.trim().length > 0);
+      if (!allStrings) {
+        return res.status(400).json({ success: false, message: 'imageUrls must be an array of non-empty strings' });
+      }
     }
 
     const rowFlag = await RowFlag.findOne({ _id: req.params.id, isDeleted: false });
@@ -40,7 +58,8 @@ exports.postMessage = async (req, res) => {
     const message = await RowFlagMessage.create({
       rowFlagId:   rowFlag._id,
       senderId,
-      content:     content.trim(),
+      content:     hasContent ? content.trim() : '',
+      imageUrls:   hasImages  ? imageUrls       : [],
       messageType: 'user',
     });
 
@@ -52,13 +71,15 @@ exports.postMessage = async (req, res) => {
     const notifyIds   = allPartyIds.filter(id => id !== senderId);
 
     const senderLabel = isBoss ? 'Manager' : 'Employee';
-    const truncated   = content.length > 80 ? `${content.slice(0, 80)}…` : content;
+    const notifyBody  = hasContent
+      ? (content.length > 80 ? `${content.slice(0, 80)}…` : content)
+      : `📎 ${imageUrls.length} image${imageUrls.length > 1 ? 's' : ''}`;
 
     await Promise.all(
       notifyIds.map(targetId =>
         notifyUser(req.app, {
           title:         `New message in "${rowFlag.contextHeader}"`,
-          body:          `${senderLabel}: ${truncated}`,
+          body:          `${senderLabel}: ${notifyBody}`,
           type:          'alert',
           priority:      isBoss ? 'normal' : 'high',
           targetUserIds: [targetId],
@@ -86,6 +107,7 @@ exports.postMessage = async (req, res) => {
         rowFlagId:   rowFlag._id.toString(),
         senderId:    message.senderId._id?.toString() ?? senderId,
         content:     message.content,
+        imageUrls:   message.imageUrls,
         messageType: message.messageType,
         isDeleted:   false,
         createdAt:   message.createdAt.toISOString(),

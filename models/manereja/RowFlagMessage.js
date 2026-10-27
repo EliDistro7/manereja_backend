@@ -25,6 +25,18 @@ const rowFlagMessageSchema = new mongoose.Schema({
     maxlength: 5000,
   },
 
+  // ── Attached images ───────────────────────────────────────────────────────
+  // R2 public URLs uploaded by the client before sending the message.
+  // Empty array for text-only messages; system messages never populate this.
+  imageUrls: {
+    type: [String],
+    default: [],
+    validate: {
+      validator: (arr) => arr.length <= 10,
+      message: 'A message may not contain more than 10 images',
+    },
+  },
+
   // ── Message classification ────────────────────────────────────────────────
   // user   → sent by boss or employee
   // system → auto-posted by background job (stage changes, reminders, resolution)

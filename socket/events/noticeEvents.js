@@ -117,6 +117,30 @@ module.exports = function noticeEvents(io, socket, userSockets) {
     });
   }
 
+  /**
+   * Validate and sanitise the imageUrls argument from a socket payload.
+   * Returns a clean string[] capped at 5, or null when the arg is absent.
+   * Emits a tasker_error and returns undefined if the value is invalid.
+   */
+  function _sanitiseImageUrls(raw, socket) {
+    if (raw === undefined || raw === null) return null;   // not supplied — leave field alone
+
+    if (!Array.isArray(raw)) {
+      socket.emit('tasker_error', { error: 'imageUrls must be an array of strings' });
+      return undefined;  // sentinel: caller must abort
+    }
+
+    const urls = raw.filter(u => typeof u === 'string' && u.trim().length > 0)
+                    .map(u => u.trim());
+
+    if (urls.length > 5) {
+      socket.emit('tasker_error', { error: 'imageUrls may contain at most 5 images' });
+      return undefined;
+    }
+
+    return urls;
+  }
+
   // ── connection_ready integration ─────────────────────────────────────────────
   //
   // The shared 'connection_ready' event is fired by base.js after loginUser.
@@ -205,11 +229,12 @@ module.exports = function noticeEvents(io, socket, userSockets) {
   socket.on('create_notice', async ({
     profileId, userId,
     title, body,
-    priority = 'normal',
-    category = 'general',
-    isPinned = false,
+    priority  = 'normal',
+    category  = 'general',
+    isPinned  = false,
     expiresAt = null,
     actions   = [],
+    imageUrls,          // ← IMAGE  optional string[]
   }) => {
     log(`create_notice → userId: ${userId}, profileId: ${profileId}, title: "${title}"`);
 
@@ -227,17 +252,22 @@ module.exports = function noticeEvents(io, socket, userSockets) {
         return;
       }
 
-      // ── 2. Resolve author name ───────────────────────────────────────────
+      // ── 2. Validate imageUrls ────────────────────────────────────────────
+      const cleanImageUrls = _sanitiseImageUrls(imageUrls, socket);  // ← IMAGE
+      if (cleanImageUrls === undefined) return;                       // validation failed
+
+      // ── 3. Resolve author name ───────────────────────────────────────────
       const author = await User.findById(userId).select('name').lean();
       const authorName = author?.name ?? 'Unknown';
 
-      // ── 3. Create document ───────────────────────────────────────────────
+      // ── 4. Create document ───────────────────────────────────────────────
       const notice = new Notice({
         profileId,
         authorId:   userId,
         authorName,
         title:      title.trim(),
         body:       body.trim(),
+        imageUrls:  cleanImageUrls ?? [],   // ← IMAGE  default to [] when not supplied
         priority,
         category,
         isPinned,
@@ -246,20 +276,20 @@ module.exports = function noticeEvents(io, socket, userSockets) {
         readByIds:  [],
       });
       await notice.save();
-      ok(`create_notice → saved notice ${notice._id}`);
+      ok(`create_notice → saved notice ${notice._id} (${notice.imageUrls.length} image(s))`);
 
       const payload = notice.toSocketPayload();
 
-      // ── 4. Ack to creator ────────────────────────────────────────────────
+      // ── 5. Ack to creator ────────────────────────────────────────────────
       socket.emit('notice_created', { success: true, notice: payload });
 
-      // ── 5. Broadcast to all profile members ──────────────────────────────
+      // ── 6. Broadcast to all profile members ──────────────────────────────
       const reached = await broadcastToProfileMembers(profileId, 'notice_created', {
         notice: payload,
       });
       debug(`create_notice → broadcast reached ${reached} online member(s)`);
 
-      // ── 6. Push to offline members ───────────────────────────────────────
+      // ── 7. Push to offline members ───────────────────────────────────────
       //    We notify every member who did NOT receive the socket emit.
       const memberIds = _collectMemberIds(profile);
       const offlineIds = memberIds.filter(uid => {
@@ -303,6 +333,7 @@ module.exports = function noticeEvents(io, socket, userSockets) {
     title, body, priority, category,
     isPinned, expiresAt,
     clearExpiry = false,
+    imageUrls,          // ← IMAGE  optional string[] — replaces the array when supplied
   }) => {
     log(`update_notice → userId: ${userId}, noticeId: ${noticeId}`);
 
@@ -323,12 +354,22 @@ module.exports = function noticeEvents(io, socket, userSockets) {
         return;
       }
 
-      // ── 3. Apply allowed fields ──────────────────────────────────────────
+      // ── 3. Validate imageUrls ────────────────────────────────────────────
+      // null return means "not supplied" → leave existing images untouched.   ← IMAGE
+      const cleanImageUrls = _sanitiseImageUrls(imageUrls, socket);           // ← IMAGE
+      if (cleanImageUrls === undefined) return;                                // validation failed
+
+      // ── 4. Apply allowed fields ──────────────────────────────────────────
       if (title    !== undefined) notice.title    = title.trim();
       if (body     !== undefined) notice.body     = body.trim();
       if (priority !== undefined) notice.priority = priority;
       if (category !== undefined) notice.category = category;
       if (isPinned !== undefined) notice.isPinned = isPinned;
+
+      // Replace image array only when the caller explicitly sends it.          ← IMAGE
+      // Sending an empty array clears all images; omitting the field leaves    ← IMAGE
+      // existing images in place.                                               ← IMAGE
+      if (cleanImageUrls !== null) notice.imageUrls = cleanImageUrls;          // ← IMAGE
 
       if (clearExpiry) {
         notice.expiresAt = null;
@@ -337,14 +378,14 @@ module.exports = function noticeEvents(io, socket, userSockets) {
       }
 
       await notice.save();
-      ok(`update_notice → notice ${noticeId} updated`);
+      ok(`update_notice → notice ${noticeId} updated (${notice.imageUrls.length} image(s))`);
 
       const payload = notice.toSocketPayload();
 
-      // ── 4. Ack to editor ─────────────────────────────────────────────────
+      // ── 5. Ack to editor ─────────────────────────────────────────────────
       socket.emit('notice_updated', { success: true, notice: payload });
 
-      // ── 5. Broadcast to all members ──────────────────────────────────────
+      // ── 6. Broadcast to all members ──────────────────────────────────────
       await broadcastToProfileMembers(notice.profileId, 'notice_updated', { notice: payload });
 
       ok(`update_notice → broadcast done for notice ${noticeId}`);

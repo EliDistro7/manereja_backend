@@ -276,6 +276,7 @@ updateProfile = async (req, res) => {
       'industry',          // ✅ was missing
       'fiscalYearStart',
       'isArchived',
+     
     ];
 
     allowedFields.forEach(field => {
